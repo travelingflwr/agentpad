@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // --- the conversation, from the transcript ------------------------------
@@ -360,6 +362,7 @@ func runChat(args []string) error {
 	sendErr := make(chan error, 4)
 	var act func(string)
 	var held []string // messages waiting for Claude Code's prompt to close
+	lastTab := ""
 	ch.cmds = loadCommands(dir)
 	ch.in.goalX = -1
 	trustAsk := false // Claude Code is asking whether to trust a new folder
@@ -498,6 +501,16 @@ func runChat(args []string) error {
 			}()
 			trustAsk = false
 			ch.flash = "Trusted. Starting Claude Code…"
+		case strings.HasPrefix(a, "ask:") && ch.ask != nil:
+			if !ch.ask.armed() {
+				return
+			}
+			d := strings.TrimPrefix(a, "ask:")
+			ch.ask.answer(d)
+			if d == "terminal" {
+				focusBlock("", session, engine)
+			}
+			ch.ask = nil
 		case strings.HasPrefix(a, "menu:"):
 			var i int
 			fmt.Sscan(strings.TrimPrefix(a, "menu:"), &i)
@@ -528,6 +541,23 @@ func runChat(args []string) error {
 		case <-tick.C:
 			s.recheck()
 			changed := refresh()
+			if haveAgent {
+				a, ok := pendingAsk(agent.SessionID)
+				switch {
+				case ok && (ch.ask == nil || ch.ask.req.ID != a.req.ID):
+					a.opened = time.Now()
+					ch.ask, changed = a, true
+				case !ok && ch.ask != nil:
+					ch.ask, changed = nil, true
+				case ok && !ch.ask.armed():
+					changed = true // redraw as it arms
+				}
+			}
+			if t := ch.tabState(agent, haveAgent); t != lastTab {
+				lastTab = t
+				fmt.Fprint(s.w, t)
+				s.w.Flush()
+			}
 			if len(held) > 0 && haveAgent && agent.State != stWaiting && !trustAsk {
 				text := held[0]
 				held = held[1:]
@@ -603,6 +633,24 @@ func runChat(args []string) error {
 					handled = false
 				}
 				if handled {
+					draw(false)
+					continue
+				}
+			}
+			if ch.ask != nil && ch.in.empty() {
+				d := ""
+				switch {
+				case k.is('y', 0):
+					d = "allow"
+				case k.is('a', 0) && ch.ask.sheet.always != "":
+					d = "always"
+				case k.is('n', 0):
+					d = "deny"
+				case k.is(keyEscape, 0):
+					d = "terminal"
+				}
+				if d != "" {
+					act("ask:" + d)
 					draw(false)
 					continue
 				}
@@ -738,8 +786,9 @@ type chatView struct {
 	menuOff bool   // Esc closed the menu for what's typed
 	menuFor string // what the menu was made for
 	buttons []chatButton
-	busy    bool    // there's something to stop
-	scroll  float64 // points scrolled up from the bottom
+	busy    bool       // there's something to stop
+	ask     *inlineAsk // a permission request to answer here
+	scroll  float64    // points scrolled up from the bottom
 	flash   string
 	spin    int
 	logH    float64
@@ -783,7 +832,11 @@ func (ch *chatView) place(all bool, status string, kind statusKind) {
 			return img
 		})
 	}
-	key := fmt.Sprint(s.ws, s.pal, compRows, ch.in.String(), ch.in.cur, ch.menuSel, ch.menuOff, status, kind, ch.flash, ch.spin%8)
+	askKey := ""
+	if ch.ask != nil {
+		askKey = fmt.Sprint(ch.ask.req.ID, ch.ask.armed())
+	}
+	key := fmt.Sprint(s.ws, s.pal, compRows, ch.in.String(), ch.in.cur, ch.menuSel, ch.menuOff, status, kind, ch.flash, ch.spin%8, askKey)
 	h := float64(compRows) * s.cellPt()
 	s.show("composer", key, logRows+1, compRows, 0, func() *image.RGBA {
 		img := s.canvas(h)
@@ -1175,6 +1228,10 @@ func (ch *chatView) menuItems() []slashCommand {
 
 func (ch *chatView) composerHeight(lines []inLine) float64 {
 	h := 8 + 26.0 // the status row
+	if ch.ask != nil {
+		x0, x1 := columnOf(ch.s.widthPt())
+		h += ch.drawAsk(painter{r: ch.s.renderer()}, ch.ask, x0, x1, 0) + 8
+	}
 	if n := len(ch.menuItems()); n > 0 {
 		h += float64(min(n, menuShown))*menuRowH + 12
 	}
@@ -1187,6 +1244,9 @@ func (ch *chatView) drawComposer(r *renderer, img *image.RGBA, w, h float64, lin
 	small := narrow(w)
 	ch.buttons = ch.buttons[:0]
 	y := 4.0
+	if ch.ask != nil {
+		y += ch.drawAsk(painter{r: r, img: img}, ch.ask, x0, x1, y) + 8
+	}
 
 	// The slash menu, above everything else.
 	if menu := ch.menuItems(); len(menu) > 0 {
@@ -1520,4 +1580,168 @@ func (ch *chatView) richText(p painter, md string, x, y, maxW, size, lh float64,
 		}
 	}
 	return y
+}
+
+// --- approvals in the conversation -------------------------------------
+
+// inlineAsk is a permission request the hook handed to the chat.
+type inlineAsk struct {
+	req     approvalRequest
+	resPath string
+	sheet   *sheet
+	opened  time.Time
+}
+
+// pendingAsk is the open inline request for the Claude Code session, if any.
+func pendingAsk(sessionID string) (*inlineAsk, bool) {
+	files, _ := filepath.Glob(filepath.Join(requestsDir(), "*.json"))
+	for _, f := range files {
+		if strings.HasSuffix(f, ".result.json") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var req approvalRequest
+		if json.Unmarshal(data, &req) != nil || !req.Inline || req.SessionID != sessionID {
+			continue
+		}
+		res := strings.TrimSuffix(f, ".json") + ".result.json"
+		if _, err := os.Stat(res); err == nil {
+			continue // answered, the hook is on its way
+		}
+		return &inlineAsk{req: req, resPath: res, sheet: newSheet(req)}, true
+	}
+	return nil, false
+}
+
+func (a *inlineAsk) armed() bool { return time.Since(a.opened) >= armDelay }
+
+func (a *inlineAsk) answer(decision string) {
+	out, _ := json.Marshal(approvalResult{Decision: decision})
+	writeAtomic(a.resPath, out)
+}
+
+// drawAsk draws the request as a card in the composer, from y, and returns
+// its height. With a nil image it only measures.
+func (ch *chatView) drawAsk(p painter, a *inlineAsk, x0, x1, y float64) float64 {
+	r := p.r
+	sh := a.sheet
+	start := y
+	pad := 14.0
+	if p.img != nil {
+		// The card first, sized by a measuring pass, then what's on it.
+		h := ch.drawAsk(painter{r: r}, a, x0, x1, y)
+		p.roundRect(x0, y, x1, y+h, 12, r.tinted(r.amber(), 0.12))
+		p.fillRect(x0, y+10, x0+3, y+h-10, r.amber())
+	}
+	y += pad + 12
+	p.text("Claude wants to", x0+pad, y, 11.5, true, r.amber(), x1-x0-2*pad)
+	y += 22
+	p.text(sh.title, x0+pad, y, 16, true, r.pal.text, x1-x0-2*pad)
+	if sh.detail != "" {
+		y += 18
+		p.text(sh.detail, x0+pad, y, 12, false, r.pal.gray, x1-x0-2*pad)
+	}
+	y += 10
+	if len(sh.code) > 0 {
+		y = ch.drawCode(p, sh.code, x0+pad, x1-pad, y, 10) + 10
+	}
+	if sh.prose != "" {
+		y = ch.richText(p, sh.prose, x0+pad, y, x1-x0-2*pad, 12.5, 18, r.pal.gray) + 8
+	}
+
+	// The buttons.
+	type btn struct{ decision, label, key string }
+	btns := []btn{{"allow", "Allow", "y"}}
+	if sh.always != "" {
+		btns = append(btns, btn{"always", "Always", "a"})
+	}
+	btns = append(btns, btn{"deny", "Deny", "n"})
+	fade := 1.0
+	if !a.armed() {
+		fade = 0.45
+	}
+	bx := x0 + pad
+	white := rgb(255, 255, 255)
+	if luminance(r.pal.accent) > 0.3 {
+		white = rgb(20, 20, 20)
+	}
+	m := r.mono()
+	pm := painter{r: m, img: p.img}
+	for i, b := range btns {
+		lw := r.width(b.label, 13, true)
+		bw := lw + 46
+		bg, fg := r.tinted(r.pal.text, 0.1*fade), premulOr(r, r.pal.text, fade)
+		if i == 0 {
+			bg, fg = r.tinted(r.pal.accent, fade), white
+		}
+		if b.decision == "deny" {
+			fg = premulOr(r, r.red(), fade)
+		}
+		p.roundRect(bx, y, bx+bw, y+buttonH, buttonH/2, bg)
+		p.raw(b.label, bx+14, y+buttonH/2+4.5, 13, true, fg)
+		kx := bx + 14 + lw + 6
+		p.roundRect(kx, y+8, kx+16, y+buttonH-8, 4, r.tinted(r.pal.text, 0.12*fade))
+		kw := m.width(b.key, 10.5, true)
+		pm.raw(b.key, kx+8-kw/2, y+buttonH/2+3.8, 10.5, true, fg)
+		if p.img != nil {
+			ch.buttons = append(ch.buttons, chatButton{"ask:" + b.decision, bx, y, bx + bw, y + buttonH})
+		}
+		bx += bw + 8
+	}
+	y += buttonH + 8
+	hint := "Esc answers in the terminal"
+	if sh.always != "" {
+		hint = "Always: " + sh.always
+	}
+	p.text(hint, x0+pad, y+12, 11, false, r.pal.faint, x1-x0-2*pad)
+	y += 12 + pad
+	return y - start
+}
+
+// --- Rex's tab markers ----------------------------------------------------
+
+// tabState is the marker for where Claude is.
+func (ch *chatView) tabState(a Agent, have bool) string {
+	switch {
+	case !have:
+		return tabStatus("working", "", ch.project, "Starting Claude Code")
+	case a.State == stWaiting && strings.Contains(a.Activity, "question"):
+		return tabStatus("blocked", "question", ch.project, a.Activity)
+	case a.State == stWaiting:
+		return tabStatus("blocked", "permission", ch.project, orDefault(a.Activity, "Needs your permission"))
+	case a.State == stWorking:
+		return tabStatus("working", "", ch.project, a.Activity)
+	case a.State == stIdle && len(ch.log.items) > 0:
+		return tabStatus("done", "", ch.project, oneLine(stripMarkdown(a.Said), 200))
+	}
+	return tabStatus("idle", "", ch.project, "")
+}
+
+// tabStatus is OSC 7501, which Rex shows on the chat's tab and sidebar row
+// and in its notifications, as it does for agents it knows: the state, the
+// Claude icon, the project and what Claude is doing or asking.
+func tabStatus(state, kind, project, msg string) string {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	seq := "\x1b]7501;state=" + state
+	if kind != "" {
+		seq += ":kind=" + kind
+	}
+	seq += ":app=claude:title=" + b64(cutBytes(project, 192))
+	if msg != "" {
+		seq += ":msg=" + b64(cutBytes(msg, 2048))
+	}
+	return seq + "\x1b\\"
+}
+
+func cutBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

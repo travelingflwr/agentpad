@@ -94,6 +94,14 @@ transcript and types what you write into it:
 - **Esc** or **Stop** interrupts, **Ctrl+O** or **Terminal** shows the engine's
   own terminal (it keeps working throughout), **Ctrl+D** closes the chat and
   leaves Claude Code running. The wheel, Page Up and Page Down scroll.
+- When you're looking at the chat, a permission request appears right in
+  it, as a card with the command or the diff: **y** allows, **a** always
+  allows, **n** denies, Esc leaves it to the terminal, or tap the buttons.
+  When you're somewhere else, the sheet floats to you as usual, and so do
+  questions.
+- The chat's Rex tab shows Claude's state the way Rex shows agents it knows:
+  the Claude icon, a dot while it works or needs you, and a notification
+  with what it's asking.
 - Permission sheets and questions float over the chat, wherever the engine
   runs. A message you send while Claude Code is asking something waits until
   you've answered, so it can't land in the prompt.
@@ -152,6 +160,10 @@ Claude: `agentpad install --settings try.json`, then `claude --settings try.json
 | `AGENTPAD_THEME=light` or `dark` | fixed colors instead of following Rex |
 
 ## Credits
+
+In-chat approvals and the tab markers (OSC 7501) follow
+[tr3x](https://github.com/macnason/tr3x) by macnason, which does this for T3
+Code's threads.
 
 The kitty graphics plumbing, key decoder and theme queries come from
 [rexpad](https://github.com/almonk/rexpad) by Alasdair Monk, by way of

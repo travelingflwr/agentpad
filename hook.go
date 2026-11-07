@@ -40,6 +40,9 @@ type approvalRequest struct {
 	// Elsewhere is set when the agent's pane is in another session than
 	// the one the sheet floats over: its window's label.
 	Elsewhere string `json:"elsewhere,omitempty"`
+	// Inline is set when the agent's chat is what you're looking at: the
+	// chat shows the request in the conversation, with no sheet.
+	Inline bool `json:"inline,omitempty"`
 }
 
 type approvalResult struct {
@@ -143,9 +146,14 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 		Tool: in.ToolName, Input: in.ToolInput, Suggestions: in.Suggestions,
 		Subagent: in.AgentID != "", HookPID: os.Getpid(), Deadline: time.Now().Add(approvalWait),
 	}
-	if chat, ok := chatSurface(own); ok {
-		// An agentpad chat is this agent's face: the sheet floats over it.
-		target = chat
+	chat, haveChat := chatSurface(own)
+	if haveChat {
+		// An agentpad chat is this agent's face: the sheet floats over it,
+		// or, when you're looking at the chat, the chat asks you itself.
+		target = chat.Session
+		if v, err := viewSession("", chat.Session); err == nil && v.focusedBlock() == chat.Block && label == "Approve" {
+			req.Inline = true
+		}
 	} else if target == own {
 		// Watching this very pane? Its own prompt is right there.
 		if v, err := viewSession("", own); err == nil && v.focusedBlock() == block && contains(watched, own) &&
@@ -171,6 +179,10 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 	defer os.Remove(reqPath)
 	defer os.Remove(resPath)
 
+	if req.Inline {
+		return awaitInline(req, resPath, chat.PID)
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return approvalResult{}, false
@@ -190,22 +202,44 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 	return res, true
 }
 
-// chatSurface is the Rex session of the agentpad chat drawing the Claude
-// Code in session, when one is open.
-func chatSurface(session string) (string, bool) {
+type surface struct {
+	Session string `json:"session"`
+	Block   string `json:"block"`
+	PID     int    `json:"pid"`
+}
+
+// chatSurface is the agentpad chat drawing the Claude Code in session, when
+// one is open.
+func chatSurface(session string) (surface, bool) {
+	var sf surface
 	data, err := os.ReadFile(surfacePath(session))
 	if err != nil {
-		return "", false
-	}
-	var sf struct {
-		Session string `json:"session"`
-		Block   string `json:"block"`
-		PID     int    `json:"pid"`
+		return sf, false
 	}
 	if json.Unmarshal(data, &sf) != nil || sf.Session == "" || sf.PID <= 0 || syscall.Kill(sf.PID, 0) != nil {
-		return "", false // gone without tidying up
+		return sf, false // gone without tidying up
 	}
-	return sf.Session, true
+	return sf, true
+}
+
+// awaitInline waits for the chat to answer req: until the result appears,
+// the prompt is answered in the terminal, the chat closes, or time's up.
+func awaitInline(req approvalRequest, resPath string, chatPID int) (approvalResult, bool) {
+	watch := newTranscriptWatch(req.Transcript, req.Tool, req.Input)
+	watch.answered() // read the history
+	for time.Now().Before(req.Deadline) {
+		time.Sleep(150 * time.Millisecond)
+		if data, err := os.ReadFile(resPath); err == nil {
+			var res approvalResult
+			if json.Unmarshal(data, &res) == nil {
+				return res, true
+			}
+		}
+		if watch.answered() || syscall.Kill(chatPID, 0) != nil {
+			return approvalResult{}, false
+		}
+	}
+	return approvalResult{}, false
 }
 
 func surfacePath(session string) string {

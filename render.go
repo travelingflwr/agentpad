@@ -25,6 +25,7 @@ func runRender(args []string) error {
 	live := fs.Bool("live", false, "the board: draw the real sessions instead of made-up ones")
 	transcript := fs.String("transcript", "", "the chat: the Claude Code transcript to draw")
 	input := fs.String("input", "", "the chat: what's typed in the composer")
+	ask := fs.Bool("ask", false, "the chat: with a permission request to answer")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -84,6 +85,10 @@ func runRender(args []string) error {
 		ch.in.set(*input)
 		if len(ch.in.text) > 6 {
 			ch.in.move(len(ch.in.text) - 6) // show the cursor mid-text
+		}
+		if *ask {
+			req := demoEdit()
+			ch.ask = &inlineAsk{req: req, sheet: newSheet(req), opened: time.Now().Add(-time.Second)}
 		}
 		ch.still(r, img)
 	default:
