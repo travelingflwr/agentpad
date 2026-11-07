@@ -42,6 +42,9 @@ func runApprove(args []string) error {
 		return err
 	}
 	resPath := strings.TrimSuffix(args[0], ".json") + ".result.json"
+	if req.Tool == "AskUserQuestion" {
+		return runQuestion(req, resPath)
+	}
 	answer := func(decision, note string) {
 		out, _ := json.Marshal(approvalResult{Decision: decision, Note: note})
 		writeAtomic(resPath, out)

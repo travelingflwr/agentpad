@@ -29,22 +29,30 @@ const (
 )
 
 type Agent struct {
-	SessionID  string     `json:"session_id"`
-	Cwd        string     `json:"cwd"`
-	Transcript string     `json:"transcript_path,omitempty"`
-	RexSession string     `json:"rex_session,omitempty"`
-	RexBlock   string     `json:"rex_block,omitempty"`
-	RexServer  string     `json:"rex_server,omitempty"`
-	Host       string     `json:"host,omitempty"`
-	State      agentState `json:"state"`
-	Activity   string     `json:"activity,omitempty"` // what it's doing, or what it's asking
-	Prompt     string     `json:"prompt,omitempty"`   // your last message
-	Said       string     `json:"said,omitempty"`     // the start of its last reply
-	Tools      int        `json:"tools"`              // tool calls this turn
-	Subagents  int        `json:"subagents,omitempty"`
-	Started    time.Time  `json:"started"`           // when this turn began
-	Updated    time.Time  `json:"updated"`           // the last event
-	Waiting    int        `json:"waiting,omitempty"` // open permission requests
+	SessionID  string      `json:"session_id"`
+	Cwd        string      `json:"cwd"`
+	Transcript string      `json:"transcript_path,omitempty"`
+	RexSession string      `json:"rex_session,omitempty"`
+	RexBlock   string      `json:"rex_block,omitempty"`
+	RexServer  string      `json:"rex_server,omitempty"`
+	Host       string      `json:"host,omitempty"`
+	State      agentState  `json:"state"`
+	Activity   string      `json:"activity,omitempty"` // what it's doing, or what it's asking
+	Prompt     string      `json:"prompt,omitempty"`   // your last message
+	Said       string      `json:"said,omitempty"`     // the start of its last reply
+	Tools      int         `json:"tools"`              // tool calls this turn
+	Subagents  int         `json:"subagents,omitempty"`
+	Started    time.Time   `json:"started"`           // when this turn began
+	Updated    time.Time   `json:"updated"`           // the last event
+	Waiting    int         `json:"waiting,omitempty"` // open permission requests
+	Opened     time.Time   `json:"opened"`            // when the session began
+	Tasks      []agentTask `json:"tasks,omitempty"`   // Claude's own task list, when it keeps one
+}
+
+type agentTask struct {
+	ID      string `json:"id"`
+	Subject string `json:"subject"`
+	Status  string `json:"status"` // pending, active, or done
 }
 
 // Project is the folder the agent works in, by name.
@@ -185,6 +193,8 @@ type hookInput struct {
 	Notification   string          `json:"notification_type"`
 	Message        string          `json:"message"`
 	LastMessage    string          `json:"last_assistant_message"`
+	TaskID         string          `json:"task_id"`
+	TaskSubject    string          `json:"task_subject"`
 	Reason         string          `json:"reason"`
 }
 
@@ -217,6 +227,9 @@ func recordEvent(in hookInput) error {
 				a.State, a.Activity = stIdle, ""
 				a.Started = time.Now()
 			}
+			if a.Opened.IsZero() || in.Source == "startup" || in.Source == "clear" {
+				a.Opened, a.Tasks = time.Now(), nil
+			}
 		case "UserPromptSubmit":
 			a.State, a.Activity, a.Said = stWorking, "Thinking", ""
 			a.Prompt = oneLine(in.Prompt, 240)
@@ -244,7 +257,14 @@ func recordEvent(in hookInput) error {
 			a.State = stWaiting
 			a.Waiting++
 			a.Activity = describeTool(in.ToolName, in.ToolInput, a.Cwd)
+		case "TaskCreated":
+			a.setTask(in.TaskID, in.TaskSubject, "pending")
+		case "TaskCompleted":
+			a.setTask(in.TaskID, in.TaskSubject, "done")
 		case "PostToolUse", "PostToolUseFailure", "PermissionDenied":
+			if in.Event == "PostToolUse" {
+				a.trackTasks(in.ToolName, in.ToolInput)
+			}
 			if a.Waiting > 0 {
 				a.Waiting--
 			}
@@ -271,6 +291,137 @@ func recordEvent(in hookInput) error {
 		}
 	})
 	return err
+}
+
+// setTask adds or updates one of Claude's tasks.
+func (a *Agent) setTask(id, subject, status string) {
+	if id == "" {
+		return
+	}
+	for i := range a.Tasks {
+		if a.Tasks[i].ID == id {
+			if subject != "" {
+				a.Tasks[i].Subject = subject
+			}
+			if status != "" {
+				a.Tasks[i].Status = status
+			}
+			return
+		}
+	}
+	if status == "" {
+		status = "pending"
+	}
+	a.Tasks = append(a.Tasks, agentTask{id, subject, status})
+}
+
+// trackTasks follows Claude's task tools: TaskUpdate changes a task's
+// status, and TodoWrite (the older checklist) replaces the whole list.
+func (a *Agent) trackTasks(tool string, raw json.RawMessage) {
+	var in map[string]any
+	if json.Unmarshal(raw, &in) != nil {
+		return
+	}
+	str := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := in[k].(string); ok && v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	status := map[string]string{"pending": "pending", "in_progress": "active", "completed": "done"}
+	switch tool {
+	case "TaskUpdate":
+		id := str("taskId", "task_id", "id")
+		if str("status") == "deleted" {
+			for i, t := range a.Tasks {
+				if t.ID == id {
+					a.Tasks = append(a.Tasks[:i], a.Tasks[i+1:]...)
+					break
+				}
+			}
+			return
+		}
+		a.setTask(id, str("subject"), status[str("status")])
+	case "TodoWrite":
+		todos, _ := in["todos"].([]any)
+		a.Tasks = nil
+		for i, t := range todos {
+			m, _ := t.(map[string]any)
+			text, _ := m["content"].(string)
+			st, _ := m["status"].(string)
+			if st == "in_progress" {
+				if af, _ := m["activeForm"].(string); af != "" {
+					text = af
+				}
+			}
+			a.Tasks = append(a.Tasks, agentTask{fmt.Sprint(i), text, status[st]})
+		}
+	}
+}
+
+// --- progress ---------------------------------------------------------------
+
+// progress is how far along an agent's plan is.
+type progress struct {
+	done, active, total int
+	current             string // the step it's on
+}
+
+// planOf reads the agent's plan: its rexpad list if it keeps one (in this
+// session), or else Claude's own task list.
+func planOf(a Agent) (progress, bool) {
+	var p progress
+	if a.RexBlock != "" {
+		path := filepath.Join(rexpadDir(), "block-"+strings.TrimPrefix(a.RexBlock, "block:")+".json")
+		if fi, err := os.Stat(path); err == nil && (a.Opened.IsZero() || fi.ModTime().After(a.Opened)) {
+			var list struct {
+				Groups []struct {
+					Items []struct {
+						Text   string `json:"text"`
+						Status string `json:"status"`
+					} `json:"items"`
+				} `json:"groups"`
+			}
+			if data, err := os.ReadFile(path); err == nil && json.Unmarshal(data, &list) == nil {
+				for _, g := range list.Groups {
+					for _, it := range g.Items {
+						p.add(it.Status, it.Text)
+					}
+				}
+				if p.total > 0 {
+					return p, true
+				}
+			}
+		}
+	}
+	for _, t := range a.Tasks {
+		p.add(t.Status, t.Subject)
+	}
+	return p, p.total > 0
+}
+
+func (p *progress) add(status, text string) {
+	p.total++
+	switch status {
+	case "done":
+		p.done++
+	case "active":
+		p.active++
+		if p.current == "" {
+			p.current = text
+		}
+	}
+}
+
+func rexpadDir() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "rexpad")
 }
 
 // asksYou is whether a tool is itself a question for you, answered in the

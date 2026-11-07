@@ -23,13 +23,16 @@ const hookTag = "# agentpad"
 // in seconds. The permission hook waits for you, so it gets longer than the
 // approval sheet stays up.
 var hookEvents = []struct {
-	name    string
-	timeout int
+	name, matcher, arg string
+	timeout            int
 }{
-	{"SessionStart", 5}, {"UserPromptSubmit", 5}, {"PreToolUse", 5},
-	{"PermissionRequest", int(approvalWait.Seconds()) + 120},
-	{"PostToolUse", 5}, {"PostToolUseFailure", 5}, {"PermissionDenied", 5},
-	{"Notification", 5}, {"Stop", 5}, {"StopFailure", 5}, {"SessionEnd", 5},
+	{"SessionStart", "", "", 5}, {"UserPromptSubmit", "", "", 5}, {"PreToolUse", "", "", 5},
+	// Claude's questions wait for you, like permissions.
+	{"PreToolUse", "AskUserQuestion", "question", int(approvalWait.Seconds()) + 120},
+	{"PermissionRequest", "", "", int(approvalWait.Seconds()) + 120},
+	{"PostToolUse", "", "", 5}, {"PostToolUseFailure", "", "", 5}, {"PermissionDenied", "", "", 5},
+	{"TaskCreated", "", "", 5}, {"TaskCompleted", "", "", 5},
+	{"Notification", "", "", 5}, {"Stop", "", "", 5}, {"StopFailure", "", "", 5}, {"SessionEnd", "", "", 5},
 }
 
 func runInstall(args []string, remove bool) error {
@@ -74,7 +77,7 @@ func runInstall(args []string, remove bool) error {
 	if remove {
 		fmt.Println("removed agentpad's hooks from", *path)
 	} else {
-		fmt.Printf("added agentpad's hooks to %s for %d events.\nClaude Code sessions started from now on use them.\n", *path, len(hookEvents))
+		fmt.Printf("added agentpad's %d hooks to %s.\nClaude Code sessions started from now on use them.\n", len(hookEvents), *path)
 	}
 	return nil
 }
@@ -97,11 +100,38 @@ func editHooks(settings []byte, command string, remove bool) ([]byte, bool, erro
 	if err != nil {
 		return nil, false, fmt.Errorf("hooks: %w", err)
 	}
+	var names []string
+	ours := map[string][]json.RawMessage{}
 	for _, ev := range hookEvents {
+		if _, ok := ours[ev.name]; !ok {
+			names = append(names, ev.name)
+			ours[ev.name] = nil
+		}
+		if remove {
+			continue
+		}
+		cmd := strings.Replace(command, " hook ", " hook "+ev.arg+" ", 1)
+		if ev.arg == "" {
+			cmd = command
+		}
+		group := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": cmd, "timeout": ev.timeout}}}
+		if ev.matcher != "" {
+			group["matcher"] = ev.matcher
+		}
+		ours[ev.name] = append(ours[ev.name], marshalPlain(group))
+	}
+	// Events agentpad no longer uses lose their tagged hooks too.
+	for _, e := range hooks {
+		if _, ok := ours[e.k]; !ok && strings.Contains(string(e.v), hookTag) {
+			names = append(names, e.k)
+			ours[e.k] = nil
+		}
+	}
+	for _, name := range names {
 		var groups []json.RawMessage
-		if raw, ok := hooks.get(ev.name); ok {
+		if raw, ok := hooks.get(name); ok {
 			if err := json.Unmarshal(raw, &groups); err != nil {
-				return nil, false, fmt.Errorf("hooks.%s: %w", ev.name, err)
+				return nil, false, fmt.Errorf("hooks.%s: %w", name, err)
 			}
 		}
 		var kept []json.RawMessage
@@ -110,16 +140,12 @@ func editHooks(settings []byte, command string, remove bool) ([]byte, bool, erro
 				kept = append(kept, g)
 			}
 		}
-		if !remove {
-			kept = append(kept, marshalPlain(map[string]any{"hooks": []any{map[string]any{
-				"type": "command", "command": command, "timeout": ev.timeout,
-			}}}))
-		}
+		kept = append(kept, ours[name]...)
 		if len(kept) == 0 {
-			hooks.del(ev.name)
+			hooks.del(name)
 			continue
 		}
-		hooks.set(ev.name, json.RawMessage("["+string(bytes.Join(asBytes(kept), []byte(",")))+"]"))
+		hooks.set(name, json.RawMessage("["+string(bytes.Join(asBytes(kept), []byte(",")))+"]"))
 	}
 	if len(hooks) == 0 {
 		top.del("hooks")

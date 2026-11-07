@@ -36,6 +36,19 @@ the command in a code box, an edit as a diff, a new file's contents.
 - Anything that goes wrong (no Rex, a closed pane, a timeout) leaves the
   decision to the terminal. agentpad never decides on its own.
 
+## Questions that come to you
+
+When Claude asks you a multiple-choice question, it floats the same way, as
+option cards. Press a number or click to choose. When a question takes
+several answers, pick them and press Done. With more than one question, the
+sheet goes through them in turn (← goes back). Your answers go straight to
+Claude. **Esc** has the terminal ask instead, where you can also type an
+answer of your own.
+
+<p align="center">
+  <img src="docs/question-dark.png" width="460" alt="A question sheet: where Saturday's route should start, with three option cards numbered 1 to 3">
+</p>
+
 ## A presence for every agent
 
 `agentpad show` docks the board beside your pane, and `agentpad float` floats
@@ -46,7 +59,11 @@ it. Every Claude Code session is a card:
 - **Working**, with what it's doing right now ("Editing render.go", "Run the
   route tests"), how many tools it has used, and its subagents.
 - **Done**, with the start of its last reply.
-- Your last message to it, underneath.
+- **Its plan,** when it keeps one: a progress ring with "4/7", and the step
+  it's on. agentpad reads the agent's [rexpad](https://github.com/almonk/rexpad)
+  list, or Claude's own task list in sessions that have one (newer models
+  only get it with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`).
+- Otherwise, your last message to it.
 
 `j` `k` to move, **Enter** (or a click) jumps to the agent's pane, `x` forgets
 a card, `q` closes the board.
@@ -79,7 +96,11 @@ Claude: `agentpad install --settings try.json`, then `claude --settings try.json
   showing, floats the sheet there with `session.new_layer`, resizes it to fit
   with `session.resize_layer`, and waits for it with `rex wait`. Your answer
   goes back to Claude Code as the hook's decision.
-- **Answering in the terminal** doesn't stop the hook, so the sheet watches
+- **A question** uses a `PreToolUse` hook on `AskUserQuestion`, which answers
+  by returning the questions with your answers filled in. Claude Code shows
+  its own question only after that hook returns, so the sheet is the
+  question until you answer it or press Esc.
+- **Answering a permission in the terminal** doesn't stop the hook, so the sheet watches
   the session's transcript for the tool call's result and closes itself.
 - **The board** watches the state folder and redraws when a session changes.
   The selection is a separate small image under the list, so moving through
@@ -90,6 +111,7 @@ Claude: `agentpad install --settings try.json`, then `claude --settings try.json
 | Variable | |
 | --- | --- |
 | `AGENTPAD_APPROVALS=off` | keep permission prompts in the terminal; the board still works |
+| `AGENTPAD_QUESTIONS=off` | keep Claude's questions in the terminal |
 | `AGENTPAD_ALWAYS_FLOAT=1` | float the sheet even over the agent's own pane |
 | `AGENTPAD_THEME=light` or `dark` | fixed colors instead of following Rex |
 

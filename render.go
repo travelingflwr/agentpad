@@ -47,6 +47,24 @@ func runRender(args []string) error {
 			req = demoBash()
 		}
 		newSheet(req).draw(r, img, s.widthPt(), s.heightPt(), true, "")
+	case "question", "multi":
+		req := demoQuestion(what == "multi")
+		qs := &questionSheet{req: req}
+		var in struct {
+			Questions []question `json:"questions"`
+		}
+		json.Unmarshal(req.Input, &in)
+		qs.questions = in.Questions
+		qs.picked = make([]map[int]bool, len(in.Questions))
+		for i := range qs.picked {
+			qs.picked[i] = map[int]bool{}
+		}
+		if what == "multi" {
+			qs.picked[0] = map[int]bool{0: true, 2: true}
+			qs.cursor = 2
+		}
+		qs.draw(r, img, s.widthPt(), s.heightPt(), true, "")
+		fmt.Printf("wants %.0f pt of %.0f\n", qs.height(r, s.widthPt()), s.heightPt())
 	case "board":
 		lay := layoutBoard(s)
 		agents := demoAgents(r.now)
@@ -93,9 +111,37 @@ func demoAgents(now time.Time) []Agent {
 		{SessionID: "1", Cwd: "/p/trailhead", State: stWaiting, Activity: "Run the route tests for the trail closure",
 			Prompt: "Start Saturday's route from the lake lot while the north loop is closed", Updated: now.Add(-20 * time.Second), Tools: 14},
 		{SessionID: "2", Cwd: "/p/heypad", State: stWorking, Activity: "Editing render.go", Tools: 23, Subagents: 1,
+			Tasks:  []agentTask{{"1", "Find the quote styles", "done"}, {"2", "Draw quotes with a softer bar", "active"}, {"3", "Check it in light and dark", "pending"}},
 			Prompt: "Give the reader a quieter quote style", Started: now.Add(-4 * time.Minute)},
 		{SessionID: "3", Cwd: "/p/fieldnotes", State: stIdle, Said: "Issue 112 is drafted and the links all check out.",
 			Prompt: "Draft issue 112 from my notes", Updated: now.Add(-12 * time.Minute)},
 		{SessionID: "4", Cwd: "/p/garden-club", State: stEnded, Prompt: "Dedupe the seed swap list", Updated: now.Add(-50 * time.Minute)},
 	}
+}
+
+func demoQuestion(multi bool) approvalRequest {
+	q := map[string]any{
+		"question": "Where should Saturday's route start while the north loop is closed?",
+		"header":   "Trailhead",
+		"options": []map[string]string{
+			{"label": "Lake lot", "description": "Closest to the loop, with parking for about 40 cars. Adds a mile each way."},
+			{"label": "Ranger station", "description": "Has the trail maps and restrooms, but the lot fills by 8."},
+			{"label": "Ask the group", "description": "Post both options in the group thread and go with the vote."},
+		},
+		"multiSelect": false,
+	}
+	if multi {
+		q = map[string]any{
+			"question": "Which checks should run before the route goes out?",
+			"header":   "Checks",
+			"options": []map[string]string{
+				{"label": "Route tests", "description": "go test ./internal/route/..."},
+				{"label": "Map tiles", "description": "Make sure the lake lot is on the offline map"},
+				{"label": "Weather", "description": "Saturday's forecast for the trailhead"},
+			},
+			"multiSelect": true,
+		}
+	}
+	in, _ := json.Marshal(map[string]any{"questions": []any{q, q}})
+	return approvalRequest{Cwd: "/Users/you/Projects/trailhead", Tool: "AskUserQuestion", Input: in}
 }

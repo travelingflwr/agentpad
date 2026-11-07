@@ -42,8 +42,9 @@ type approvalRequest struct {
 }
 
 type approvalResult struct {
-	Decision string `json:"decision"` // allow, always, deny, or terminal
-	Note     string `json:"note,omitempty"`
+	Decision string            `json:"decision"` // allow, always, deny, answer, or terminal
+	Note     string            `json:"note,omitempty"`
+	Answers  map[string]string `json:"answers,omitempty"` // a question's text to the chosen labels
 }
 
 func requestsDir() string { return filepath.Join(stateDir(), "requests") }
@@ -55,6 +56,16 @@ func runHook(args []string) error {
 	}
 	var in hookInput
 	if json.Unmarshal(data, &in) != nil {
+		return nil
+	}
+	// `hook question` is the long-running hook for Claude's questions;
+	// the everyday hook has already recorded the event.
+	if len(args) > 0 && args[0] == "question" {
+		if in.Event == "PreToolUse" && in.ToolName == "AskUserQuestion" {
+			if out := askQuestion(in); out != nil {
+				os.Stdout.Write(out)
+			}
+		}
 		return nil
 	}
 	if err := recordEvent(in); err != nil {
@@ -81,8 +92,44 @@ func logf(format string, args ...any) {
 // askForApproval floats the sheet and returns the hook's output, or nil to
 // leave the decision to the terminal.
 func askForApproval(in hookInput) []byte {
-	if !inRex() || os.Getenv("AGENTPAD_APPROVALS") == "off" || asksYou(in.ToolName) {
+	if os.Getenv("AGENTPAD_APPROVALS") == "off" || asksYou(in.ToolName) {
 		return nil
+	}
+	res, ok := floatSheet(in, "Approve")
+	if !ok {
+		return nil
+	}
+	return decisionJSON(res, in.Suggestions)
+}
+
+// askQuestion floats Claude's question and returns its answer as the hook's
+// output, or nil to let the terminal ask. Claude Code shows its own question
+// only after this hook returns.
+func askQuestion(in hookInput) []byte {
+	if os.Getenv("AGENTPAD_QUESTIONS") == "off" {
+		return nil
+	}
+	res, ok := floatSheet(in, "Question")
+	if !ok || res.Decision != "answer" || len(res.Answers) == 0 {
+		return nil
+	}
+	var input map[string]any
+	if json.Unmarshal(in.ToolInput, &input) != nil {
+		return nil
+	}
+	input["answers"] = res.Answers
+	out, _ := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
+		"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": input,
+	}})
+	return out
+}
+
+// floatSheet floats a sheet for in over the Rex window you're looking at and
+// waits for your answer. ok is false when no sheet was shown: outside Rex,
+// when you're already looking at the agent's pane, or on any error.
+func floatSheet(in hookInput, label string) (approvalResult, bool) {
+	if !inRex() {
+		return approvalResult{}, false
 	}
 	own, block := os.Getenv("REX_SESSION"), os.Getenv("REX_BLOCK")
 	target := own
@@ -99,7 +146,7 @@ func askForApproval(in hookInput) []byte {
 		// Watching this very pane? Its own prompt is right there.
 		if v, err := viewSession("", own); err == nil && v.focusedBlock() == block && contains(watched, own) &&
 			os.Getenv("AGENTPAD_ALWAYS_FLOAT") == "" {
-			return nil
+			return approvalResult{}, false
 		}
 	} else if v, err := viewSession("", own); err == nil {
 		_, req.Elsewhere = v.windowOf(block)
@@ -109,34 +156,34 @@ func askForApproval(in hookInput) []byte {
 	}
 
 	if err := os.MkdirAll(requestsDir(), 0o700); err != nil {
-		return nil
+		return approvalResult{}, false
 	}
 	reqPath := filepath.Join(requestsDir(), req.ID+".json")
 	resPath := filepath.Join(requestsDir(), req.ID+".result.json")
 	data, _ := json.Marshal(req)
 	if err := writeAtomic(reqPath, data); err != nil {
-		return nil
+		return approvalResult{}, false
 	}
 	defer os.Remove(reqPath)
 	defer os.Remove(resPath)
 
 	self, err := os.Executable()
 	if err != nil {
-		return nil
+		return approvalResult{}, false
 	}
-	layer, sheet, err := floatPane("", target, "Approve", paneCommand(self, "approve", reqPath), approvalBounds, true)
+	layer, sheet, err := floatPane("", target, label, paneCommand(self, "approve", reqPath), approvalBounds, true)
 	if err != nil {
-		logf("float approval: %v", err)
-		return nil
+		logf("float %s: %v", label, err)
+		return approvalResult{}, false
 	}
 	waitBlock("", target, sheet)
 	closeLayer("", target, layer) // in case the sheet failed to start
 
 	var res approvalResult
 	if data, err := os.ReadFile(resPath); err != nil || json.Unmarshal(data, &res) != nil {
-		return nil
+		return approvalResult{}, false
 	}
-	return decisionJSON(res, in.Suggestions)
+	return res, true
 }
 
 func decisionJSON(res approvalResult, suggestions json.RawMessage) []byte {

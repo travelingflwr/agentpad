@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
@@ -199,6 +200,8 @@ func runBoard(args []string) error {
 // stampDir changes whenever a session's record does.
 func stampDir() string {
 	paths, _ := filepath.Glob(filepath.Join(agentsDir(), "*.json"))
+	plans, _ := filepath.Glob(filepath.Join(rexpadDir(), "block-*.json"))
+	paths = append(paths, plans...)
 	var b strings.Builder
 	for _, p := range paths {
 		if fi, err := os.Stat(p); err == nil {
@@ -351,13 +354,27 @@ func drawCard(r *renderer, img *image.RGBA, a Agent, y0, w, pitch float64) {
 		}
 	}
 	aw := r.textRight(img, ago, w-padX-4, l1, 11.5, false, r.pal.faint)
+	plan, hasPlan := planOf(a)
+	if hasPlan && a.State != stEnded {
+		label := fmt.Sprintf("%d/%d", plan.done, plan.total)
+		lw := r.width(label, 11.5, true)
+		rx := w - padX - 4 - aw - 10
+		r.drawRaw(img, label, rx-lw, l1, 11.5, true, r.pal.gray)
+		ringX := rx - lw - 11
+		frac := (float64(plan.done) + 0.5*float64(plan.active)) / float64(plan.total)
+		r.ring(img, ringX, l1-4.5, 6.5, frac, r.pal.accent)
+		aw += 10 + lw + 11 + 8
+	}
 	name := a.Project()
 	if a.Subagents > 0 && a.State == stWorking {
 		name += fmt.Sprintf(" · %d subagent%s", a.Subagents, plural(a.Subagents))
 	}
 	r.text(img, name, textX, l1, 14, true, r.pal.text, maxW-aw-10)
 	r.text(img, line2, textX, l2, 12.5, a.State == stWaiting, line2Col, maxW)
-	if a.Prompt != "" {
+	switch {
+	case hasPlan && plan.current != "" && a.State != stEnded:
+		r.text(img, plan.current, textX, l3, 11.5, false, r.pal.gray, maxW)
+	case a.Prompt != "":
 		r.text(img, "“"+a.Prompt+"”", textX, l3, 11.5, false, r.pal.faint, maxW)
 	}
 }
@@ -383,4 +400,22 @@ func agoText(now, t time.Time) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return t.Format("Jan 2")
+}
+
+// ring draws a progress ring: a faint track, and frac of it filled from
+// the top, clockwise.
+func (r *renderer) ring(img *image.RGBA, cx, cy, rad, frac float64, col color.RGBA) {
+	const w = 1.6
+	track := r.path(img)
+	track.poly(arc(nil, cx, cy, rad, 0, 2*math.Pi))
+	track.poly(reversed(arc(nil, cx, cy, rad-w, 0, 2*math.Pi)))
+	track.fill(r.tinted(r.pal.text, 0.14))
+	if frac <= 0 {
+		return
+	}
+	frac = math.Min(1, frac)
+	a0, a1 := -math.Pi/2, -math.Pi/2+2*math.Pi*frac
+	p := r.path(img)
+	p.poly(append(arc(nil, cx, cy, rad, a0, a1), reversed(arc(nil, cx, cy, rad-w, a0, a1))...))
+	p.fill(col)
 }
