@@ -743,12 +743,19 @@ func fitLayer(s *screen, wantPt float64) {
 				winRows := float64(s.ws.rows) / b0[3]
 				want := (math.Ceil(wantPt/s.cellPt()) + 2) / winRows // + the pane's border
 				h := math.Max(0.22, math.Min(want, 0.9))
-				if math.Abs(h-b0[3]) < 0.02 {
+				// On a window as narrow as a phone, the sheet takes the
+				// whole width (and a narrower share of the height).
+				x, w := b0[0], b0[2]
+				if s.widthPt() < 380 {
+					x, w = 0.02, 0.96
+					h = math.Min(h*b0[2]/w*1.15, 0.9)
+				}
+				if math.Abs(h-b0[3]) < 0.02 && w == b0[2] {
 					return
 				}
 				bottom := b0[1] + b0[3]
 				rexAPI("", "session.resize_layer", map[string]any{"session_id": session, "layer_id": l.LayerID,
-					"bounds": rect{b0[0], bottom - h, b0[2], h}}, nil)
+					"bounds": rect{x, bottom - h, w, h}}, nil)
 				return
 			}
 		}

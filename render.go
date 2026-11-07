@@ -23,6 +23,8 @@ func runRender(args []string) error {
 	cols := fs.Int("cols", 64, "pane width, in cells")
 	rows := fs.Int("rows", 26, "pane height, in cells")
 	live := fs.Bool("live", false, "the board: draw the real sessions instead of made-up ones")
+	transcript := fs.String("transcript", "", "the chat: the Claude Code transcript to draw")
+	input := fs.String("input", "", "the chat: what's typed in the composer")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -75,6 +77,15 @@ func runRender(args []string) error {
 		y := lay.header + float64(sel)*lay.pitch
 		r.fillRoundRect(img, selInset, y+3, s.widthPt()-selInset, y+lay.pitch-3, selRadius, r.pal.selBg)
 		drawBoard(r, img, agents, s.widthPt(), lay, "")
+	case "chat":
+		c := &chatLog{path: *transcript, byID: map[string]int{}}
+		c.read()
+		ch := &chatView{s: s, log: c, project: "playground", cmds: loadCommands(".")}
+		ch.in.set(*input)
+		if len(ch.in.text) > 6 {
+			ch.in.move(len(ch.in.text) - 6) // show the cursor mid-text
+		}
+		ch.still(r, img)
 	default:
 		return fmt.Errorf("render what? sheet, bash or board")
 	}

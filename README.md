@@ -83,13 +83,26 @@ transcript and types what you write into it:
 - A live status line ("Editing main.go · 12s · Esc interrupts"), and an amber
   one when Claude needs you. Permissions and questions float as the sheets
   above.
-- **Enter** sends, **Shift+Enter** starts a new line, **↑** brings back what
-  you sent, **Esc** interrupts, the wheel or Page Up and Page Down scroll.
-  **Ctrl+O** shows the engine's own terminal, which keeps working throughout.
-  **Ctrl+D** closes the chat and leaves Claude Code running.
+- A composer that edits like a text box: arrows, Option for words, Cmd or
+  Home and End for lines, ↑ and ↓ between lines (and through what you've sent),
+  Ctrl+U, Ctrl+K and Option+Backspace. **Enter** sends, **Shift+Enter** starts
+  a new line.
+- Type **/** for a menu of Claude Code's commands, plus the commands and skills
+  in your settings, plugins and project. ↑↓ choose, Tab completes, Enter runs.
+  Commands that open their own screen in Claude Code (`/model`, `/config`)
+  show the terminal for you.
+- **Esc** or **Stop** interrupts, **Ctrl+O** or **Terminal** shows the engine's
+  own terminal (it keeps working throughout), **Ctrl+D** closes the chat and
+  leaves Claude Code running. The wheel, Page Up and Page Down scroll.
+- Permission sheets and questions float over the chat, wherever the engine
+  runs. A message you send while Claude Code is asking something waits until
+  you've answered, so it can't land in the prompt.
+- On a phone-narrow pane the margins slim down, the hints step aside, and
+  Send, Stop and Terminal are buttons to tap. The sheets widen to fit.
 - A folder Claude Code hasn't seen asks whether to trust it: **Ctrl+Y**.
-- `--continue` picks up the folder's last conversation, and `--block PANE`
-  draws a Claude Code that's already running.
+- `--continue` picks up the folder's last conversation, `--block PANE` draws a
+  Claude Code that's already running, and flags after `--` go to Claude Code
+  (`agentpad chat . -- --permission-mode plan`).
 
 ## Install
 

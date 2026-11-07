@@ -45,6 +45,7 @@ type chatItem struct {
 	input  json.RawMessage
 	result string
 	isErr  bool
+	denied bool // you said no
 	done   bool
 
 	ver  int // bumps when the item changes, to redo its layout
@@ -166,6 +167,9 @@ func (c *chatLog) take(line []byte) bool {
 			}
 			it := &c.items[i]
 			it.result, it.isErr, it.done = resultText(p.Content), p.IsError, true
+			if it.isErr && strings.Contains(it.result, "doesn't want to proceed") {
+				it.result, it.denied = "", true
+			}
 			it.ver++
 			changed = true
 		}
@@ -296,9 +300,18 @@ func runChat(args []string) error {
 	if err := needRex(); err != nil {
 		return err
 	}
+	// agentpad chat [DIR] [-- CLAUDE FLAGS]
+	rest := fs.Args()
+	var extra []string
+	for i, a := range rest {
+		if a == "--" {
+			rest, extra = rest[:i], rest[i+1:]
+			break
+		}
+	}
 	dir, _ := os.Getwd()
-	if fs.NArg() > 0 {
-		dir, _ = filepath.Abs(fs.Arg(0))
+	if len(rest) > 0 {
+		dir, _ = filepath.Abs(rest[0])
 	}
 	session, engine := os.Getenv("REX_SESSION"), *attach // the engine's session and pane
 	if engine != "" {
@@ -307,11 +320,11 @@ func runChat(args []string) error {
 			return fmt.Errorf("no Claude Code that agentpad knows of is running in %s", engine)
 		}
 		session = a.RexSession
-		if a.Cwd != "" && fs.NArg() == 0 {
+		if a.Cwd != "" && len(rest) == 0 {
 			dir = a.Cwd
 		}
 	} else {
-		var claudeArgs []string
+		claudeArgs := extra
 		if *cont {
 			claudeArgs = append(claudeArgs, "--continue")
 		}
@@ -320,6 +333,14 @@ func runChat(args []string) error {
 			return err
 		}
 	}
+
+	// Tell the engine's hooks that this pane is its face, so its sheets
+	// float here.
+	sp := surfacePath(session)
+	os.MkdirAll(filepath.Dir(sp), 0o700)
+	surf, _ := json.Marshal(map[string]any{"session": os.Getenv("REX_SESSION"), "block": os.Getenv("REX_BLOCK"), "pid": os.Getpid()})
+	writeAtomic(sp, surf)
+	defer os.Remove(sp)
 
 	s, done, err := openScreen("")
 	if err != nil {
@@ -337,6 +358,10 @@ func runChat(args []string) error {
 	var history []string
 	histAt := -1
 	sendErr := make(chan error, 4)
+	var act func(string)
+	var held []string // messages waiting for Claude Code's prompt to close
+	ch.cmds = loadCommands(dir)
+	ch.in.goalX = -1
 	trustAsk := false // Claude Code is asking whether to trust a new folder
 	lastLook := time.Time{}
 
@@ -411,6 +436,78 @@ func runChat(args []string) error {
 	refresh()
 	draw(true)
 
+	// submit sends what's in the box, or a slash command. A command that
+	// opens its own screen in Claude Code shows the terminal too.
+	submit := func(raw string, held2 bool) {
+		text := strings.TrimSpace(raw)
+		if text == "" {
+			return
+		}
+		if !haveAgent {
+			ch.flash = "Claude Code isn't ready yet"
+			return
+		}
+		ch.in.set("")
+		ch.scroll, ch.flash, histAt = 0, "", -1
+		if !held2 {
+			history = append(history, text)
+		}
+		if agent.State == stWaiting || trustAsk {
+			// Keys typed now would land in Claude Code's prompt, where
+			// Enter picks its highlighted answer. Hold the message.
+			held = append(held, text)
+			ch.flash = "Claude Code is asking you something: this sends once it's answered"
+			return
+		}
+		sent++
+		showTerminal := false
+		if strings.HasPrefix(text, "/") {
+			name := strings.Fields(text)[0]
+			for _, c := range ch.cmds {
+				if c.name == name && c.terminal {
+					showTerminal = true
+				}
+			}
+		}
+		go func() {
+			err := sendPrompt(session, engine, text)
+			sendErr <- err
+			if err == nil && showTerminal {
+				time.Sleep(300 * time.Millisecond)
+				focusBlock("", session, engine)
+			}
+		}()
+	}
+	// act does what a key or a button asks for.
+	act = func(a string) {
+		switch {
+		case a == "send":
+			submit(ch.in.String(), false)
+		case a == "stop":
+			if agent.State == stWorking || agent.State == stWaiting || sent > 0 {
+				go sendKey(session, engine, "escape")
+				ch.flash = "Interrupting…"
+			}
+		case a == "terminal":
+			focusBlock("", session, engine)
+		case a == "trust" && trustAsk:
+			go func() {
+				sendKey(session, engine, "down")
+				time.Sleep(150 * time.Millisecond)
+				sendKey(session, engine, "enter")
+			}()
+			trustAsk = false
+			ch.flash = "Trusted. Starting Claude Code…"
+		case strings.HasPrefix(a, "menu:"):
+			var i int
+			fmt.Sscan(strings.TrimPrefix(a, "menu:"), &i)
+			if menu := ch.menuItems(); i < len(menu) {
+				ch.in.set(menu[i].name)
+				submit(menu[i].name, false)
+			}
+		}
+	}
+
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -431,6 +528,12 @@ func runChat(args []string) error {
 		case <-tick.C:
 			s.recheck()
 			changed := refresh()
+			if len(held) > 0 && haveAgent && agent.State != stWaiting && !trustAsk {
+				text := held[0]
+				held = held[1:]
+				submit(text, true)
+				changed = true
+			}
 			_, kind := status()
 			if changed {
 				draw(true)
@@ -465,74 +568,123 @@ func runChat(args []string) error {
 				continue
 			}
 			if ev.click != nil {
+				x, y := s.clickPt(ev.click)
+				if a := ch.hit(x, y-ch.logH); a != "" {
+					act(a)
+					draw(false)
+				}
 				continue
 			}
 			if ev.paste != "" {
-				ch.input = append(ch.input, []rune(strings.ReplaceAll(ev.paste, "\r\n", "\n"))...)
+				ch.in.insert([]rune(strings.ReplaceAll(ev.paste, "\r\n", "\n")))
 				ch.flash = ""
 				draw(false)
 				continue
 			}
 			k := ev.key
-			typed := []rune(nil)
-			switch {
-			case k.is('d', modCtrl), k.is('c', modCtrl) && len(ch.input) == 0:
-				done()
-				fmt.Println("Claude Code keeps running in its own Rex session.")
-				os.Exit(0)
-			case k.is('c', modCtrl), k.is('u', modCtrl):
-				ch.input = nil
-			case k.is('y', modCtrl) && trustAsk:
-				go func() {
-					sendKey(session, engine, "down")
-					time.Sleep(150 * time.Millisecond)
-					sendKey(session, engine, "enter")
-				}()
-				trustAsk = false
-				ch.flash = "Trusted. Starting Claude Code…"
-			case k.is('o', modCtrl):
-				focusBlock("", session, engine)
-				continue
-			case k.is(keyEscape, 0):
-				if agent.State == stWorking || agent.State == stWaiting {
-					go sendKey(session, engine, "escape")
-					ch.flash = "Interrupting…"
+			lines := ch.in.layout(s.renderer(), inputSize, ch.inputW(s.widthPt()))
+			r := s.renderer()
+			// The slash menu takes the arrows, Tab, Enter and Esc while it's up.
+			if menu := ch.menuItems(); len(menu) > 0 {
+				n := len(menu)
+				handled := true
+				switch {
+				case k.is(keyUp, 0), k.is(keyTab, modShift):
+					ch.menuSel = (ch.menuSel + n - 1) % n
+				case k.is(keyDown, 0):
+					ch.menuSel = (ch.menuSel + 1) % n
+				case k.is(keyTab, 0):
+					ch.in.set(menu[ch.menuSel].name + " ")
+				case k.is(keyEnter, 0):
+					act(fmt.Sprintf("menu:%d", ch.menuSel))
+				case k.is(keyEscape, 0):
+					ch.menuOff = true
+				default:
+					handled = false
 				}
-			case k.is(keyEnter, 0):
-				text := strings.TrimSpace(string(ch.input))
-				if text == "" {
+				if handled {
+					draw(false)
 					continue
 				}
-				if !haveAgent {
-					ch.flash = "Claude Code isn't ready yet"
-					break
-				}
-				ch.input, ch.scroll, ch.flash, histAt = nil, 0, "", -1
-				history = append(history, text)
-				sent++
-				go func() { sendErr <- sendPrompt(session, engine, text) }()
+			}
+			typed := []rune(nil)
+			switch {
+			case k.is('d', modCtrl) && ch.in.empty(), k.is('c', modCtrl) && ch.in.empty():
+				done()
+				os.Remove(sp)
+				fmt.Println("Claude Code keeps running in its own Rex session.")
+				os.Exit(0)
+			case k.is('d', modCtrl), k.is(keyDelete, 0):
+				ch.in.deleteForward()
+			case k.is('c', modCtrl):
+				ch.in.set("")
+			case k.is('u', modCtrl):
+				ls := ch.in.lineStart()
+				ch.in.text = append(ch.in.text[:ls], ch.in.text[ch.in.cur:]...)
+				ch.in.move(ls)
+			case k.is('k', modCtrl):
+				le := ch.in.lineEnd()
+				ch.in.text = append(ch.in.text[:ch.in.cur], ch.in.text[le:]...)
+			case k.is('y', modCtrl) && trustAsk:
+				act("trust")
+			case k.is('o', modCtrl):
+				act("terminal")
+				continue
+			case k.is(keyEscape, 0):
+				act("stop")
+			case k.is(keyEnter, 0):
+				act("send")
 			case k.is(keyEnter, modShift), k.is(keyEnter, modAlt), k.is('j', modCtrl):
 				typed = []rune{'\n'}
 			case k.is(keyBackspace, 0):
-				if n := len(ch.input); n > 0 {
-					ch.input = ch.input[:n-1]
-				}
+				ch.in.backspace()
 			case k.is(keyBackspace, modAlt), k.is('w', modCtrl):
-				ch.input = deleteWord(ch.input)
-			case k.is(keyUp, 0) && (len(ch.input) == 0 || histAt >= 0):
-				if len(history) > 0 {
-					if histAt < 0 {
-						histAt = len(history)
+				ch.in.deleteWord()
+			case k.is(keyBackspace, modSuper):
+				ls := ch.in.lineStart()
+				ch.in.text = append(ch.in.text[:ls], ch.in.text[ch.in.cur:]...)
+				ch.in.move(ls)
+			case k.is(keyLeft, 0), k.is('b', modCtrl):
+				ch.in.move(ch.in.cur - 1)
+			case k.is(keyRight, 0), k.is('f', modCtrl):
+				ch.in.move(ch.in.cur + 1)
+			case k.is(keyLeft, modAlt), k.is('b', modAlt):
+				ch.in.move(ch.in.wordStart())
+			case k.is(keyRight, modAlt), k.is('f', modAlt):
+				ch.in.move(ch.in.wordEnd())
+			case k.is(keyLeft, modSuper), k.is(keyHome, 0), k.is('a', modCtrl):
+				ch.in.move(ch.in.lineStart())
+			case k.is(keyRight, modSuper), k.is(keyEnd, 0), k.is('e', modCtrl):
+				ch.in.move(ch.in.lineEnd())
+			case k.is(keyUp, modSuper):
+				ch.in.move(0)
+			case k.is(keyDown, modSuper):
+				ch.in.move(len(ch.in.text))
+			case k.is(keyUp, 0):
+				// Up on the first line (or in an empty box) goes back
+				// through what you've sent.
+				if histAt >= 0 || ch.in.empty() || !ch.in.vertical(r, lines, inputSize, -1) {
+					if len(history) > 0 && (histAt >= 0 || ch.in.empty()) {
+						if histAt < 0 {
+							histAt = len(history)
+						}
+						histAt = max(0, histAt-1)
+						ch.in.set(history[histAt])
+					} else {
+						ch.in.move(0)
 					}
-					histAt = max(0, histAt-1)
-					ch.input = []rune(history[histAt])
 				}
-			case k.is(keyDown, 0) && histAt >= 0:
-				histAt++
-				if histAt >= len(history) {
-					histAt, ch.input = -1, nil
-				} else {
-					ch.input = []rune(history[histAt])
+			case k.is(keyDown, 0):
+				if histAt >= 0 {
+					histAt++
+					if histAt >= len(history) {
+						histAt = -1
+						ch.in.set("")
+					} else {
+						ch.in.set(history[histAt])
+					}
+				} else if !ch.in.vertical(r, lines, inputSize, 1) {
+					ch.in.move(len(ch.in.text))
 				}
 			case k.is(keyPageUp, 0):
 				ch.scroll += ch.logH * 0.8
@@ -550,23 +702,12 @@ func runChat(args []string) error {
 				continue
 			}
 			if typed != nil {
-				ch.input = append(ch.input, typed...)
+				ch.in.insert(typed)
 				ch.flash = ""
 			}
 			draw(false)
 		}
 	}
-}
-
-func deleteWord(in []rune) []rune {
-	n := len(in)
-	for n > 0 && unicode.IsSpace(in[n-1]) {
-		n--
-	}
-	for n > 0 && !unicode.IsSpace(in[n-1]) {
-		n--
-	}
-	return in[:n]
 }
 
 func shortDur(d time.Duration) string {
@@ -591,7 +732,13 @@ type chatView struct {
 	s       *screen
 	log     *chatLog
 	project string
-	input   []rune
+	in      composer
+	cmds    []slashCommand
+	menuSel int
+	menuOff bool   // Esc closed the menu for what's typed
+	menuFor string // what the menu was made for
+	buttons []chatButton
+	busy    bool    // there's something to stop
 	scroll  float64 // points scrolled up from the bottom
 	flash   string
 	spin    int
@@ -614,8 +761,9 @@ func (ch *chatView) place(all bool, status string, kind statusKind) {
 	s := ch.s
 	r := s.renderer()
 	w := s.widthPt()
-	lines := ch.inputLines(r, w)
-	compPt := 10 + 18 + 2*11 + float64(len(lines))*inputLH + 22
+	ch.busy = kind == skBusy
+	lines := ch.in.layout(r, inputSize, ch.inputW(w))
+	compPt := ch.composerHeight(lines)
 	compRows := min(s.ws.rows-2, int(math.Ceil(compPt/s.cellPt())))
 	logRows := s.ws.rows - compRows
 	if logRows != ch.logRows {
@@ -635,10 +783,11 @@ func (ch *chatView) place(all bool, status string, kind statusKind) {
 			return img
 		})
 	}
-	key := fmt.Sprint(s.ws, s.pal, compRows, string(ch.input), status, kind, ch.flash, ch.spin%8)
+	key := fmt.Sprint(s.ws, s.pal, compRows, ch.in.String(), ch.in.cur, ch.menuSel, ch.menuOff, status, kind, ch.flash, ch.spin%8)
+	h := float64(compRows) * s.cellPt()
 	s.show("composer", key, logRows+1, compRows, 0, func() *image.RGBA {
-		img := s.canvas(float64(compRows) * s.cellPt())
-		ch.drawComposer(s.renderer(), img, w, float64(compRows)*s.cellPt(), lines, status, kind)
+		img := s.canvas(h)
+		ch.drawComposer(s.renderer(), img, w, h, lines, status, kind)
 		return img
 	})
 }
@@ -878,6 +1027,10 @@ func (ch *chatView) drawTool(p painter, it *chatItem, x0, x1, y float64) float64
 	if it.done {
 		title = pastTense(title)
 	}
+	if it.denied {
+		title += " · denied"
+		dot = r.pal.faint
+	}
 	y += 15
 	p.circle(x0+5, y-4.5, 4, dot)
 	p.text(title, x0+18, y, 13, true, r.pal.text, x1-x0-18)
@@ -962,40 +1115,131 @@ func pastTense(s string) string {
 }
 
 // columnOf is the reading column in a pane w points wide: the whole width,
-// up to a comfortable measure, centered.
+// up to a comfortable measure, centered. A phone-narrow pane gets slimmer
+// margins.
 func columnOf(w float64) (x0, x1 float64) {
 	const widest = 820.0
-	if w-2*chatPad <= widest {
-		return chatPad, w - chatPad
+	pad := chatPad
+	if narrow(w) {
+		pad = 10
+	}
+	if w-2*pad <= widest {
+		return pad, w - pad
 	}
 	x0 = math.Round((w - widest) / 2)
 	return x0, x0 + widest
 }
 
-func (ch *chatView) inputLines(r *renderer, w float64) []string {
-	c0, c1 := columnOf(w)
-	maxW := c1 - c0 - 28
-	var out []string
-	for _, hard := range strings.Split(string(ch.input), "\n") {
-		ws := r.wrap(hard, inputSize, false, maxW)
-		if len(ws) == 0 {
-			ws = []string{""}
-		}
-		out = append(out, ws...)
-	}
-	if len(out) > maxInputLn {
-		out = out[len(out)-maxInputLn:]
-	}
-	return out
+// narrow is a pane about as wide as a phone.
+func narrow(w float64) bool { return w < 520 }
+
+const (
+	menuRowH  = 34.0
+	menuShown = 6
+	sendSize  = 28.0
+)
+
+type chatButton struct {
+	action         string
+	x0, y0, x1, y1 float64
 }
 
-func (ch *chatView) drawComposer(r *renderer, img *image.RGBA, w, h float64, lines []string, status string, kind statusKind) {
+// hit is the action under a click at (x, y) in the composer, if any.
+func (ch *chatView) hit(x, y float64) string {
+	for _, b := range ch.buttons {
+		if x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1 {
+			return b.action
+		}
+	}
+	return ""
+}
+
+// inputW is how wide the composer's text runs.
+func (ch *chatView) inputW(w float64) float64 {
+	c0, c1 := columnOf(w)
+	return c1 - c0 - 28 - sendSize - 6
+}
+
+// menuItems is the slash menu for what's typed: a "/" and a name, no space
+// yet.
+func (ch *chatView) menuItems() []slashCommand {
+	text := ch.in.String()
+	if text != ch.menuFor {
+		ch.menuFor, ch.menuSel, ch.menuOff = text, 0, false
+	}
+	if ch.menuOff || !strings.HasPrefix(text, "/") || strings.ContainsAny(text, " \n") {
+		return nil
+	}
+	return matchCommands(ch.cmds, text)
+}
+
+func (ch *chatView) composerHeight(lines []inLine) float64 {
+	h := 8 + 26.0 // the status row
+	if n := len(ch.menuItems()); n > 0 {
+		h += float64(min(n, menuShown))*menuRowH + 12
+	}
+	h += 2*11 + float64(min(len(lines), maxInputLn))*inputLH // the box
+	return h + 24                                            // the hint
+}
+
+func (ch *chatView) drawComposer(r *renderer, img *image.RGBA, w, h float64, lines []inLine, status string, kind statusKind) {
 	x0, x1 := columnOf(w)
-	// The status line.
-	sy := 18.0
+	small := narrow(w)
+	ch.buttons = ch.buttons[:0]
+	y := 4.0
+
+	// The slash menu, above everything else.
+	if menu := ch.menuItems(); len(menu) > 0 {
+		n := min(len(menu), menuShown)
+		first := max(0, min(ch.menuSel-n/2, len(menu)-n))
+		mh := float64(n)*menuRowH + 8
+		r.fillRoundRect(img, x0, y, x1, y+mh, 10, r.tinted(r.pal.text, 0.07))
+		m := r.mono()
+		for i := first; i < first+n; i++ {
+			c := menu[i]
+			ry := y + 4 + float64(i-first)*menuRowH
+			if i == ch.menuSel {
+				r.fillRoundRect(img, x0+4, ry, x1-4, ry+menuRowH, 7, r.tinted(r.pal.accent, 0.2))
+			}
+			nameW := m.width(codeText(m, c.name), 12.5, true)
+			m.drawRaw(img, codeText(m, c.name), x0+14, ry+21.5, 12.5, true, r.pal.text)
+			desc := c.desc
+			if c.terminal {
+				desc = strings.TrimSpace(desc + " · opens the terminal")
+			}
+			if !small || nameW < (x1-x0)*0.45 {
+				dx := x0 + 14 + math.Max(nameW+14, math.Min(200, (x1-x0)*0.35))
+				r.text(img, desc, dx, ry+21.5, 12, false, r.pal.gray, x1-dx-12)
+			}
+			ch.buttons = append(ch.buttons, chatButton{fmt.Sprintf("menu:%d", i), x0, ry, x1, ry + menuRowH})
+		}
+		y += mh + 4
+	}
+
+	// The status row, with buttons for what keys would do.
+	sy := y + 18
+	bx := x1
+	pill := func(label, action string, primary bool) {
+		lw := r.width(label, 11.5, true)
+		bw := lw + 22
+		bx -= bw
+		bg, fg := r.tinted(r.pal.text, 0.09), r.pal.text
+		if primary {
+			bg, fg = r.tinted(r.red(), 0.16), r.red()
+		}
+		r.fillRoundRect(img, bx, sy-15, bx+bw, sy+7, 11, bg)
+		r.drawRaw(img, label, bx+11, sy, 11.5, true, fg)
+		ch.buttons = append(ch.buttons, chatButton{action, bx, sy - 15, bx + bw, sy + 7})
+		bx -= 6
+	}
+	pill("Terminal", "terminal", false)
+	if kind == skBusy {
+		pill("Stop", "stop", true)
+	}
+	textW := bx - x0 - 8
 	switch {
 	case ch.flash != "":
-		r.text(img, ch.flash, x0, sy, 11.5, false, r.amber(), x1-x0)
+		r.text(img, ch.flash, x0, sy, 11.5, false, r.amber(), textW)
 	case kind == skBusy:
 		// Three dots that take turns.
 		for i := 0; i < 3; i++ {
@@ -1005,42 +1249,104 @@ func (ch *chatView) drawComposer(r *renderer, img *image.RGBA, w, h float64, lin
 			}
 			r.fillCircle(img, x0+4+float64(i)*9, sy-4, 3, r.tinted(r.pal.accent, a))
 		}
-		r.text(img, status, x0+32, sy, 11.5, true, r.pal.gray, x1-x0-32)
+		if small {
+			status = strings.TrimSuffix(status, " · Esc interrupts")
+		}
+		r.text(img, status, x0+32, sy, 11.5, true, r.pal.gray, textW-32)
 	case kind == skWarn:
 		r.fillCircle(img, x0+4, sy-4, 4, r.amber())
-		r.text(img, status, x0+14, sy, 11.5, true, r.amber(), x1-x0-14)
+		lines := r.wrap(status, 11.5, true, textW-14)
+		if len(lines) > 1 && strings.Contains(status, "Ctrl+Y") {
+			// The trust question gets a button of its own.
+			pill("Trust", "trust", false)
+			status = "Trust this new folder?"
+			textW = bx - x0 - 8
+		}
+		r.text(img, status, x0+14, sy, 11.5, true, r.amber(), textW-14)
 	default:
-		r.text(img, "Claude Code · "+ch.project, x0, sy, 11.5, true, r.pal.faint, x1-x0)
+		r.text(img, "Claude Code · "+ch.project, x0, sy, 11.5, true, r.pal.faint, textW)
 	}
 
-	// The box.
-	by0 := sy + 10
-	by1 := by0 + 2*11 + float64(len(lines))*inputLH
+	// The box, showing the lines around the cursor.
+	by0 := y + 26 + 8
+	shown := min(len(lines), maxInputLn)
+	by1 := by0 + 2*11 + float64(shown)*inputLH
 	r.fillRoundRect(img, x0, by0, x1, by1, 12, r.tinted(r.pal.text, 0.07))
 	r.fillRoundRect(img, x0+0.5, by0+0.5, x0+3, by1-0.5, 2, r.tinted(r.pal.accent, 0.8))
 	tx := x0 + 14
+	cl, cx := ch.in.caret(r, lines, inputSize)
+	top := max(0, min(cl-shown+1, len(lines)-shown))
+	if cl < top {
+		top = cl
+	}
 	ly := by0 + 11
-	if len(ch.input) == 0 {
-		r.text(img, "Message Claude…", tx, ly+inputLH-5, inputSize, false, r.pal.faint, x1-tx-10)
-		r.fillRect(img, tx-1, ly+3, tx+0.5, ly+inputLH-1, r.pal.accent)
-	} else {
-		var last string
-		for _, l := range lines {
-			ly += inputLH
-			r.drawRaw(img, l, tx, ly-5, inputSize, false, r.pal.text)
-			last = l
+	if ch.in.empty() {
+		ph := "Message Claude…  / for commands"
+		if small {
+			ph = "Message Claude…"
 		}
-		cx := tx + r.width(last, inputSize, false)
-		if n := len(ch.input); n > 0 && ch.input[n-1] == ' ' {
-			cx += r.width(" ", inputSize, false)
-		}
-		r.fillRect(img, cx+1, ly-inputLH+3, cx+2.5, ly-1, r.pal.accent)
+		r.text(img, ph, tx, ly+inputLH-5, inputSize, false, r.pal.faint, ch.inputW(w))
 	}
-	hint := "Enter sends · Shift+Enter new line · Ctrl+O terminal · Ctrl+D close"
-	if ch.scroll > 1 {
+	for i := top; i < top+shown; i++ {
+		l := lines[i]
+		r.drawRaw(img, string(ch.in.text[l.start:l.end]), tx, ly+inputLH-5, inputSize, false, r.pal.text)
+		if i == cl {
+			r.fillRect(img, tx+cx, ly+3, tx+cx+1.5, ly+inputLH-1, r.pal.accent)
+		}
+		ly += inputLH
+	}
+	// Send, in the box's corner.
+	scx, scy := x1-8-sendSize/2, by1-8-sendSize/2
+	on := strings.TrimSpace(ch.in.String()) != ""
+	bg := r.tinted(r.pal.text, 0.12)
+	if on {
+		bg = r.pal.accent
+	}
+	r.fillCircle(img, scx, scy, sendSize/2, bg)
+	fg := rgb(255, 255, 255)
+	if luminance(r.pal.accent) > 0.3 && on {
+		fg = rgb(20, 20, 20)
+	}
+	r.arrowUp(img, scx, scy, 11, fg)
+	ch.buttons = append(ch.buttons, chatButton{"send", scx - sendSize/2 - 4, scy - sendSize/2 - 4, scx + sendSize/2 + 4, scy + sendSize/2 + 4})
+
+	hint := "Enter sends · Shift+Enter new line · / commands · Ctrl+O terminal · Ctrl+D close"
+	switch {
+	case ch.scroll > 1:
 		hint = "Scrolled up · End or Page Down to come back"
+	case len(ch.menuItems()) > 0:
+		hint = "↑↓ choose · Tab completes · Enter runs · Esc closes"
+	case small:
+		hint = ""
 	}
-	r.text(img, hint, x0, by1+15, 10.5, false, r.pal.faint, x1-x0)
+	r.text(img, hint, x0, by1+16, 10.5, false, r.pal.faint, x1-x0)
+}
+
+// arrowUp draws the send arrow centered at (cx, cy).
+func (r *renderer) arrowUp(img *image.RGBA, cx, cy, size float64, col color.RGBA) {
+	t := size * 0.16
+	p := r.path(img)
+	// The shaft.
+	p.poly([][2]float64{{cx - t/2, cy - size*0.3}, {cx + t/2, cy - size*0.3}, {cx + t/2, cy + size/2}, {cx - t/2, cy + size/2}})
+	// The head.
+	p.poly([][2]float64{{cx, cy - size/2}, {cx + size*0.42, cy - size*0.06}, {cx + size*0.42 - t*1.1, cy - size*0.06 + t*1.1}, {cx, cy - size/2 + t*1.6}, {cx - size*0.42 + t*1.1, cy - size*0.06 + t*1.1}, {cx - size*0.42, cy - size*0.06}})
+	p.fill(col)
+}
+
+// still draws the whole pane into img, for `agentpad render chat`.
+func (ch *chatView) still(r *renderer, img *image.RGBA) {
+	s := ch.s
+	w := s.widthPt()
+	lines := ch.in.layout(r, inputSize, ch.inputW(w))
+	compRows := min(s.ws.rows-2, int(math.Ceil(ch.composerHeight(lines)/s.cellPt())))
+	ch.logRows = s.ws.rows - compRows
+	ch.logH = float64(ch.logRows) * s.cellPt()
+	logImg := s.canvas(ch.logH)
+	ch.drawLog(r, logImg, w, ch.layout(r, w))
+	comp := s.canvas(float64(compRows) * s.cellPt())
+	ch.drawComposer(r, comp, w, float64(compRows)*s.cellPt(), lines, "", skIdle)
+	overImage(img, logImg, 0)
+	overImage(img, comp, logImg.Bounds().Dy())
 }
 
 // snapshot writes the pane as it looks to ~/.local/state/agentpad/snapshot-PID.png.

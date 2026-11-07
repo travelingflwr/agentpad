@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -142,7 +143,10 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 		Tool: in.ToolName, Input: in.ToolInput, Suggestions: in.Suggestions,
 		Subagent: in.AgentID != "", HookPID: os.Getpid(), Deadline: time.Now().Add(approvalWait),
 	}
-	if target == own {
+	if chat, ok := chatSurface(own); ok {
+		// An agentpad chat is this agent's face: the sheet floats over it.
+		target = chat
+	} else if target == own {
 		// Watching this very pane? Its own prompt is right there.
 		if v, err := viewSession("", own); err == nil && v.focusedBlock() == block && contains(watched, own) &&
 			os.Getenv("AGENTPAD_ALWAYS_FLOAT") == "" {
@@ -184,6 +188,28 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 		return approvalResult{}, false
 	}
 	return res, true
+}
+
+// chatSurface is the Rex session of the agentpad chat drawing the Claude
+// Code in session, when one is open.
+func chatSurface(session string) (string, bool) {
+	data, err := os.ReadFile(surfacePath(session))
+	if err != nil {
+		return "", false
+	}
+	var sf struct {
+		Session string `json:"session"`
+		Block   string `json:"block"`
+		PID     int    `json:"pid"`
+	}
+	if json.Unmarshal(data, &sf) != nil || sf.Session == "" || sf.PID <= 0 || syscall.Kill(sf.PID, 0) != nil {
+		return "", false // gone without tidying up
+	}
+	return sf.Session, true
+}
+
+func surfacePath(session string) string {
+	return filepath.Join(stateDir(), "surfaces", safeName(session)+".json")
 }
 
 func decisionJSON(res approvalResult, suggestions json.RawMessage) []byte {
