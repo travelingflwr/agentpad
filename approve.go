@@ -683,12 +683,13 @@ func diffLines(old, new string) []codeLine {
 		case i < n && j < m && a[i] == b[j]:
 			out = append(out, codeLine{lnPlain, a[i]})
 			i, j = i+1, j+1
-		case j < m && (i >= n || lcs[i][j+1] >= lcs[i+1][j]):
-			out = append(out, codeLine{lnAdd, b[j]})
-			j++
-		default:
+		case i < n && (j >= m || lcs[i+1][j] >= lcs[i][j+1]):
+			// What's gone comes before what replaces it.
 			out = append(out, codeLine{lnDel, a[i]})
 			i++
+		default:
+			out = append(out, codeLine{lnAdd, b[j]})
+			j++
 		}
 	}
 	return trimContext(out, 3)

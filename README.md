@@ -68,6 +68,29 @@ it. Every Claude Code session is a card:
 `j` `k` to move, **Enter** (or a click) jumps to the agent's pane, `x` forgets
 a card, `q` closes the board.
 
+## A Rexy Claude Code
+
+`agentpad chat [DIR]` is Claude Code as a Rex surface. The real Claude Code
+runs in a Rex session of its own, the engine, with your subscription, tools,
+settings and slash commands. The chat pane draws the conversation from its
+transcript and types what you write into it:
+
+- Your messages, and Claude's replies with headings, lists, quotes, tables,
+  code blocks, and inline `code` and **bold**, in a reading column that stays
+  comfortable however wide the pane is.
+- Each tool call as one line ("Edited main.go", "Ran go test"), with the
+  command and the end of its output, or the edit as a diff.
+- A live status line ("Editing main.go · 12s · Esc interrupts"), and an amber
+  one when Claude needs you. Permissions and questions float as the sheets
+  above.
+- **Enter** sends, **Shift+Enter** starts a new line, **↑** brings back what
+  you sent, **Esc** interrupts, the wheel or Page Up and Page Down scroll.
+  **Ctrl+O** shows the engine's own terminal, which keeps working throughout.
+  **Ctrl+D** closes the chat and leaves Claude Code running.
+- A folder Claude Code hasn't seen asks whether to trust it: **Ctrl+Y**.
+- `--continue` picks up the folder's last conversation, and `--block PANE`
+  draws a Claude Code that's already running.
+
 ## Install
 
 You need [Rex](https://superlogical.com), Go 1.27 or later, and

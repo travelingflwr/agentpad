@@ -11,6 +11,8 @@ import (
 
 const usage = `agentpad: Claude Code, at home in Rex
 
+  agentpad chat [--continue] [DIR]        Claude Code as a Rex surface: a drawn chat, with
+                                          the real Claude Code running in a tab beside it
   agentpad show [--below] [--ratio PCT]   the agent board in a pane beside yours
   agentpad float                          the agent board in a floating window (again to close)
   agentpad board                          run the board in this pane
@@ -39,6 +41,8 @@ func main() {
 		err = runHook(args)
 	case "approve":
 		err = runApprove(args)
+	case "chat":
+		err = runChat(args)
 	case "board", "view":
 		err = runBoard(args)
 	case "show":
