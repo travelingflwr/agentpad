@@ -525,7 +525,8 @@ func runChat(args []string) error {
 	defer tick.Stop()
 	for {
 		select {
-		case <-s.quit:
+		case sig := <-s.quit:
+			logf("chat for %s closed by %v", session, sig)
 			return nil
 		case <-s.winch:
 			s.resize()
@@ -573,6 +574,7 @@ func runChat(args []string) error {
 			}
 		case ev, open := <-s.events:
 			if !open {
+				logf("chat for %s closed: its terminal went away", session)
 				return nil
 			}
 			if s.event(ev) {
@@ -660,6 +662,7 @@ func runChat(args []string) error {
 			case k.is('d', modCtrl) && ch.in.empty(), k.is('c', modCtrl) && ch.in.empty():
 				done()
 				os.Remove(sp)
+				logf("chat for %s closed with Ctrl+D", session)
 				fmt.Println("Claude Code keeps running in its own Rex session.")
 				os.Exit(0)
 			case k.is('d', modCtrl), k.is(keyDelete, 0):

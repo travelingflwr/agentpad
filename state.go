@@ -42,11 +42,12 @@ type Agent struct {
 	Said       string      `json:"said,omitempty"`     // the start of its last reply
 	Tools      int         `json:"tools"`              // tool calls this turn
 	Subagents  int         `json:"subagents,omitempty"`
-	Started    time.Time   `json:"started"`           // when this turn began
-	Updated    time.Time   `json:"updated"`           // the last event
-	Waiting    int         `json:"waiting,omitempty"` // open permission requests
-	Opened     time.Time   `json:"opened"`            // when the session began
-	Tasks      []agentTask `json:"tasks,omitempty"`   // Claude's own task list, when it keeps one
+	Started    time.Time   `json:"started"`              // when this turn began
+	Updated    time.Time   `json:"updated"`              // the last event
+	Waiting    int         `json:"waiting,omitempty"`    // open permission requests
+	Opened     time.Time   `json:"opened"`               // when the session began
+	Tasks      []agentTask `json:"tasks,omitempty"`      // Claude's own task list, when it keeps one
+	EndReason  string      `json:"end_reason,omitempty"` // why Claude Code said it ended
 }
 
 type agentTask struct {
@@ -288,6 +289,8 @@ func recordEvent(in hookInput) error {
 			}
 		case "SessionEnd":
 			a.State, a.Waiting, a.Activity = stEnded, 0, ""
+			a.EndReason = in.Reason
+			logf("session %s in %s ended: %s", in.SessionID, a.RexSession, orDefault(in.Reason, "no reason given"))
 		}
 	})
 	return err
