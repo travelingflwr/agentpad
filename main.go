@@ -13,6 +13,8 @@ const usage = `agentpad: Claude Code, at home in Rex
 
   agentpad chat [--continue] [DIR] [-- FLAGS]Claude Code as a Rex surface: a drawn chat, with
                                           the real Claude Code running in a tab beside it
+  agentpad activity                       every agent at a glance: what needs you (with its
+                                          buttons), what's working, context and plan usage
   agentpad show [--below] [--ratio PCT]   the agent board in a pane beside yours
   agentpad float                          the agent board in a floating window (again to close)
   agentpad board                          run the board in this pane
@@ -23,6 +25,8 @@ const usage = `agentpad: Claude Code, at home in Rex
 
   agentpad hook                           (run by Claude Code's hooks)
   agentpad approve REQUEST                (the approval sheet's pane)
+  agentpad statusline [COMMAND...]        (Claude Code's status line: notes context and
+                                          plan usage for activity, then runs COMMAND)
 
 Environment: AGENTPAD_APPROVALS=off keeps permission prompts in the terminal;
 AGENTPAD_ALWAYS_FLOAT=1 floats them even over the agent's own pane;
@@ -43,6 +47,10 @@ func main() {
 		err = runApprove(args)
 	case "chat":
 		err = runChat(args)
+	case "activity":
+		err = runActivity(args)
+	case "statusline":
+		err = runStatusline(args)
 	case "board", "view":
 		err = runBoard(args)
 	case "show":

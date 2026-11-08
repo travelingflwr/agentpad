@@ -78,6 +78,13 @@ func runRender(args []string) error {
 		y := lay.header + float64(sel)*lay.pitch
 		r.fillRoundRect(img, selInset, y+3, s.widthPt()-selInset, y+lay.pitch-3, selRadius, r.pal.selBg)
 		drawBoard(r, img, agents, s.widthPt(), lay, "")
+	case "activity":
+		v := demoActivity(r.now)
+		if *live {
+			v = &activityView{}
+			v.reload()
+		}
+		v.draw(r, img, s.widthPt(), s.heightPt())
 	case "chat":
 		c := &chatLog{path: *transcript, byID: map[string]int{}}
 		c.read()
@@ -160,4 +167,43 @@ func demoQuestion(multi bool) approvalRequest {
 	}
 	in, _ := json.Marshal(map[string]any{"questions": []any{q, q}})
 	return approvalRequest{Cwd: "/Users/you/Projects/trailhead", Tool: "AskUserQuestion", Input: in}
+}
+
+func demoActivity(now time.Time) *activityView {
+	agents := []Agent{
+		{SessionID: "1", Cwd: "/p/trailhead", Host: "build-box", State: stWaiting, Activity: "Run the route tests",
+			Prompt: "Start Saturday's route from the lake lot", Updated: now.Add(-2 * time.Minute)},
+		{SessionID: "2", Cwd: "/p/fieldnotes", State: stWaiting, Activity: "AskUserQuestion",
+			Prompt: "Draft issue 112 from my notes", Updated: now.Add(-9 * time.Minute)},
+		{SessionID: "3", Cwd: "/p/heypad", State: stWorking, Activity: "Editing render.go",
+			Prompt: "Give the reader a quieter quote style", Started: now.Add(-14 * time.Minute)},
+		{SessionID: "4", Cwd: "/p/garden-club", Host: "build-box", State: stWorking, Activity: "Reading seeds.csv",
+			Prompt: "Dedupe the seed swap list", Started: now.Add(-6 * time.Minute)},
+		{SessionID: "5", Cwd: "/p/trailhead", Host: "lab-server", State: stWorking, Activity: "Running go test",
+			Prompt: "Profile the slow map startup", Started: now.Add(-1 * time.Minute)},
+		{SessionID: "6", Cwd: "/p/fieldnotes", State: stIdle, Prompt: "Write the release notes", Updated: now.Add(-4 * time.Minute)},
+	}
+	bash := demoBash()
+	bash.SessionID = "1"
+	in, _ := json.Marshal(map[string]any{"questions": []any{map[string]any{
+		"question": "Which branch should the pull request go to, main or release-2.4?", "header": "Branch",
+		"options": []map[string]string{{"label": "main"}, {"label": "release-2.4"}}}}})
+	q := approvalRequest{SessionID: "2", Cwd: "/p/fieldnotes", Tool: "AskUserQuestion", Input: in}
+	return &activityView{
+		agents: agents,
+		pending: map[string]*pendingRequest{
+			"1": {req: bash, opened: now.Add(-2 * time.Minute)},
+			"2": {req: q, opened: now.Add(-9 * time.Minute)},
+		},
+		plan: planUsage{
+			FiveHour: &planWindow{Used: 62, ResetAt: now.Add(2*time.Hour + 10*time.Minute)},
+			Weekly:   &planWindow{Used: 41, ResetAt: now.Add(4 * 24 * time.Hour)},
+		},
+		hasPlan: true,
+		host:    "this-mac",
+		demoCtx: map[string]contextUse{
+			"1": {108_000, 200_000}, "2": {64_000, 200_000}, "3": {182_000, 200_000},
+			"4": {74_000, 200_000}, "5": {31_000, 1_000_000},
+		},
+	}
 }

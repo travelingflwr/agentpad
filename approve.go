@@ -106,6 +106,8 @@ func runApprove(args []string) error {
 			switch {
 			case watch.answered():
 				gone = "Answered in the terminal"
+			case fileExists(resPath):
+				gone = "Answered in Activity"
 			case req.HookPID > 0 && syscall.Kill(req.HookPID, 0) != nil:
 				gone = "Claude moved on"
 			case now.After(req.Deadline):
@@ -760,4 +762,9 @@ func fitLayer(s *screen, wantPt float64) {
 			}
 		}
 	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
