@@ -16,7 +16,7 @@ import (
 	"rsc.io/qr"
 )
 
-func runPair(port int, local bool) error {
+func runPair(port int, local bool, png string) error {
 	ip := "127.0.0.1"
 	if !local {
 		ips := tailscaleIPs()
@@ -45,6 +45,13 @@ func runPair(port int, local bool) error {
 	c, err := qr.Encode(link, qr.M)
 	if err != nil {
 		return err
+	}
+	if png != "" {
+		c.Scale = 12
+		if err := os.WriteFile(png, c.PNG(), 0o600); err != nil {
+			return err
+		}
+		fmt.Println("Wrote the QR code to", png)
 	}
 	fmt.Println()
 	printQR(c)

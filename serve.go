@@ -57,7 +57,9 @@ func serveActive() bool {
 const serveUsage = `agentpad serve: the bridge for the Nod iPhone app
 
   agentpad serve [--port N] [--demo]   run the bridge (localhost and Tailscale only)
-  agentpad serve pair [--local]        show a QR code to pair a phone (--local: for the Simulator)
+  agentpad serve pair [--local] [--png FILE]
+                                       show a QR code to pair a phone (--local: for the
+                                       Simulator; --png: also save it as a picture)
   agentpad serve devices               list paired devices
   agentpad serve revoke ID             unpair a device
   agentpad serve push-test [ID]        send a test notification
@@ -68,7 +70,7 @@ screenshots and trying the app; it never touches your real sessions.
 `
 
 func runServe(args []string) error {
-	port, demo, local := servePort, false, false
+	port, demo, local, png := servePort, false, false, ""
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
@@ -81,6 +83,11 @@ func runServe(args []string) error {
 			demo = true
 		case "--local":
 			local = true
+		case "--png":
+			if i+1 < len(args) {
+				png = args[i+1]
+				i++
+			}
 		case "-h", "--help", "help":
 			fmt.Print(serveUsage)
 			return nil
@@ -94,7 +101,7 @@ func runServe(args []string) error {
 	if len(rest) > 0 {
 		switch rest[0] {
 		case "pair":
-			return runPair(port, local)
+			return runPair(port, local, png)
 		case "devices":
 			return runDevices()
 		case "revoke":
