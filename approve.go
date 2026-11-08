@@ -108,6 +108,9 @@ func runApprove(args []string) error {
 				gone = "Answered in the terminal"
 			case fileExists(resPath):
 				gone = "Answered in Activity"
+				if via := resultVia(resPath); via != "" {
+					gone = "Answered on " + via
+				}
 			case req.HookPID > 0 && syscall.Kill(req.HookPID, 0) != nil:
 				gone = "Claude moved on"
 			case now.After(req.Deadline):

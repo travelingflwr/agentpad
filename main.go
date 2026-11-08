@@ -19,6 +19,9 @@ const usage = `agentpad: Claude Code, at home in Rex
   agentpad float                          the agent board in a floating window (again to close)
   agentpad board                          run the board in this pane
 
+  agentpad serve [pair|devices|revoke]   the bridge for Nod, the iPhone remote: agents,
+                                          approvals and questions over Tailscale
+
   agentpad install [--settings FILE]      add agentpad's hooks to Claude Code's settings
   agentpad uninstall [--settings FILE]    take them out again
   agentpad render (sheet|board) -o FILE   draw a demo picture, for checking the look
@@ -49,6 +52,8 @@ func main() {
 		err = runChat(args)
 	case "activity":
 		err = runActivity(args)
+	case "serve":
+		err = runServe(args)
 	case "statusline":
 		err = runStatusline(args)
 	case "board", "view":

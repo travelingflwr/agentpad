@@ -43,12 +43,16 @@ type approvalRequest struct {
 	// Inline is set when the agent's chat is what you're looking at: the
 	// chat shows the request in the conversation, with no sheet.
 	Inline bool `json:"inline,omitempty"`
+	// Remote is set when no sheet floats and only the phone (through
+	// agentpad serve) and the terminal can answer.
+	Remote bool `json:"remote,omitempty"`
 }
 
 type approvalResult struct {
 	Decision string            `json:"decision"` // allow, always, deny, answer, or terminal
 	Note     string            `json:"note,omitempty"`
 	Answers  map[string]string `json:"answers,omitempty"` // a question's text to the chosen labels
+	Via      string            `json:"via,omitempty"`     // the paired device that answered, if one did
 }
 
 func requestsDir() string { return filepath.Join(stateDir(), "requests") }
@@ -133,7 +137,7 @@ func askQuestion(in hookInput) []byte {
 // when you're already looking at the agent's pane, or on any error.
 func floatSheet(in hookInput, label string) (approvalResult, bool) {
 	if !inRex() {
-		return approvalResult{}, false
+		return remoteOnly(in, label)
 	}
 	own, block := os.Getenv("REX_SESSION"), os.Getenv("REX_BLOCK")
 	target := own
@@ -158,7 +162,7 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 		// Watching this very pane? Its own prompt is right there.
 		if v, err := viewSession("", own); err == nil && v.focusedBlock() == block && contains(watched, own) &&
 			os.Getenv("AGENTPAD_ALWAYS_FLOAT") == "" {
-			return approvalResult{}, false
+			return remoteOnly(in, label)
 		}
 	} else if v, err := viewSession("", own); err == nil {
 		_, req.Elsewhere = v.windowOf(block)
@@ -190,6 +194,9 @@ func floatSheet(in hookInput, label string) (approvalResult, bool) {
 	layer, sheet, err := floatPane("", target, label, paneCommand(self, "approve", reqPath), approvalBounds, true)
 	if err != nil {
 		logf("float %s: %v", label, err)
+		if label == "Approve" && serveActive() {
+			return awaitResult(req, resPath) // the phone can still answer
+		}
 		return approvalResult{}, false
 	}
 	waitBlock("", target, sheet)
@@ -220,6 +227,56 @@ func chatSurface(session string) (surface, bool) {
 		return sf, false // gone without tidying up
 	}
 	return sf, true
+}
+
+// remoteOnly is for when no sheet floats: outside Rex, or when you're
+// looking at the agent's own pane. With agentpad serve running and a phone
+// paired, a permission request still goes to the phone, while Claude Code's
+// prompt stays up in the terminal; whichever you answer first wins.
+// Questions don't: Claude Code shows its own question only once the hook
+// returns, so holding the hook would hide the question from the terminal.
+func remoteOnly(in hookInput, label string) (approvalResult, bool) {
+	if label != "Approve" || !serveActive() {
+		return approvalResult{}, false
+	}
+	req := approvalRequest{
+		ID: newID(), SessionID: in.SessionID, Cwd: in.Cwd, Transcript: in.TranscriptPath,
+		Tool: in.ToolName, Input: in.ToolInput, Suggestions: in.Suggestions,
+		Subagent: in.AgentID != "", HookPID: os.Getpid(), Deadline: time.Now().Add(approvalWait),
+		Remote: true,
+	}
+	if err := os.MkdirAll(requestsDir(), 0o700); err != nil {
+		return approvalResult{}, false
+	}
+	reqPath := filepath.Join(requestsDir(), req.ID+".json")
+	resPath := filepath.Join(requestsDir(), req.ID+".result.json")
+	data, _ := json.Marshal(req)
+	if err := writeAtomic(reqPath, data); err != nil {
+		return approvalResult{}, false
+	}
+	defer os.Remove(reqPath)
+	defer os.Remove(resPath)
+	return awaitResult(req, resPath)
+}
+
+// awaitResult waits for an answer to req from anywhere but a sheet: until
+// the result appears, the prompt is answered in the terminal, or time's up.
+func awaitResult(req approvalRequest, resPath string) (approvalResult, bool) {
+	watch := newTranscriptWatch(req.Transcript, req.Tool, req.Input)
+	watch.answered() // read the history
+	for time.Now().Before(req.Deadline) {
+		time.Sleep(150 * time.Millisecond)
+		if data, err := os.ReadFile(resPath); err == nil {
+			var res approvalResult
+			if json.Unmarshal(data, &res) == nil {
+				return res, true
+			}
+		}
+		if watch.answered() {
+			return approvalResult{}, false
+		}
+	}
+	return approvalResult{}, false
 }
 
 // awaitInline waits for the chat to answer req: until the result appears,
@@ -259,6 +316,9 @@ func decisionJSON(res approvalResult, suggestions json.RawMessage) []byte {
 	case "deny":
 		decision["behavior"] = "deny"
 		msg := "The user denied this from the approval sheet in Rex."
+		if res.Via != "" {
+			msg = "The user denied this remotely, from " + res.Via + "."
+		}
 		if res.Note != "" {
 			msg += " They said: " + res.Note
 		}
