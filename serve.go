@@ -453,6 +453,34 @@ func plainText(s string) string {
 	return strings.TrimSpace(spaces.ReplaceAllString(s, " "))
 }
 
+var (
+	attachNote  = regexp.MustCompile(`(?m)^\[User attached [^\]]*\]\s*$`)
+	attachImage = regexp.MustCompile(`(?m)^\[(?:Attached )?(?:image|file|Image)[^\]]*?(?:"([^"]+)")?[^\]]*\]\s*$`)
+	t3Context   = regexp.MustCompile(`(?s)<t3_context[^>]*>.*?</t3_context>`)
+)
+
+// userText tidies a prompt for the phone: the notes a host adds about
+// attachments (which carry local file paths) become a short marker, and
+// hidden context blocks go.
+func userText(s string) string {
+	s = t3Context.ReplaceAllString(s, "")
+	s = attachNote.ReplaceAllString(s, "")
+	n := 0
+	s = attachImage.ReplaceAllStringFunc(s, func(string) string { n++; return "" })
+	s = strings.TrimSpace(s)
+	if n > 0 {
+		mark := "📎 image"
+		if n > 1 {
+			mark = fmt.Sprintf("📎 %d images", n)
+		}
+		if s == "" {
+			return mark
+		}
+		return mark + "\n" + s
+	}
+	return s
+}
+
 func clip(s string, n int) string {
 	if len([]rune(s)) <= n {
 		return s
@@ -578,7 +606,7 @@ func buildSnapshot(host string) apiSnapshot {
 		}
 		aa := apiAgent{
 			SessionID: a.SessionID, Project: a.Project(), State: a.State, Activity: a.Activity,
-			Prompt: clip(plainText(a.Prompt), 400), Said: clip(plainText(a.Said), 400), Tools: a.Tools, Subagents: a.Subagents,
+			Prompt: clip(plainText(userText(a.Prompt)), 400), Said: clip(plainText(a.Said), 400), Tools: a.Tools, Subagents: a.Subagents,
 			Started: a.Started, Updated: a.Updated, Tasks: a.Tasks,
 			NeedsYou: needs[a.SessionID] || a.State == stWaiting,
 		}
@@ -790,13 +818,24 @@ func (s *server) handleAgent(w http.ResponseWriter, r *http.Request, d device) {
 		log := &chatLog{path: found.Transcript, cwd: found.Cwd, byID: map[string]int{}}
 		log.read()
 		items := log.items
+		tools := 0
+		for _, it := range items {
+			if it.kind == itTool {
+				tools++
+			}
+		}
+		if card != nil {
+			c := *card
+			c.Tools = tools // the whole session, not just the latest turn
+			card = &c
+		}
 		if len(items) > 40 {
 			items = items[len(items)-40:]
 		}
 		for _, it := range items {
 			switch it.kind {
 			case itUser:
-				turns = append(turns, apiTurn{Kind: "you", Text: clip(it.text, maxTextLen)})
+				turns = append(turns, apiTurn{Kind: "you", Text: clip(userText(it.text), maxTextLen)})
 			case itText:
 				turns = append(turns, apiTurn{Kind: "claude", Text: clip(it.text, maxTextLen)})
 			case itTool:

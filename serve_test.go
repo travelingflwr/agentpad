@@ -29,3 +29,17 @@ func TestCheckAnswers(t *testing.T) {
 		t.Error("a missing answer was accepted")
 	}
 }
+
+func TestUserText(t *testing.T) {
+	in := "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]\n\n[Attached image \"image.png\" is saved at: /Users/someone/x/image.png]"
+	if got := userText(in); got != "📎 image" {
+		t.Errorf("attachment only: got %q", got)
+	}
+	in = "Look at this\n\n<t3_context version=\"1\">\nname: a.png\n</t3_context>\n\n[Attached image \"a.png\" is saved at: /tmp/a.png]\n[Image: source: /tmp/b.png]"
+	if got := userText(in); got != "📎 2 images\nLook at this" {
+		t.Errorf("text with images: got %q", got)
+	}
+	if got := userText("plain [note] here"); got != "plain [note] here" {
+		t.Errorf("plain text changed: %q", got)
+	}
+}
