@@ -17,8 +17,10 @@ import (
 )
 
 func runPair(port int, local bool, png string) error {
-	ip := "127.0.0.1"
-	if !local {
+	ip, secure := "127.0.0.1", false
+	if si, ok := runningServeInfo(); ok && !local && si.TLSHost != "" {
+		ip, secure = si.TLSHost, true
+	} else if !local {
 		ips := tailscaleIPs()
 		if len(ips) == 0 {
 			return fmt.Errorf("no Tailscale address: start Tailscale, or use --local for the Simulator")
@@ -37,6 +39,9 @@ func runPair(port int, local bool, png string) error {
 	q.Set("h", ip)
 	q.Set("p", strconv.Itoa(port))
 	q.Set("c", code)
+	if secure {
+		q.Set("s", "1") // HTTPS
+	}
 	if demoMode {
 		host = "studio"
 	}
@@ -76,13 +81,18 @@ func runPair(port int, local bool, png string) error {
 	return fmt.Errorf("the pairing code expired: run agentpad serve pair again")
 }
 
-func serveRunning() bool {
-	data, err := os.ReadFile(serveInfoPath())
-	if err != nil {
-		return false
-	}
+func runningServeInfo() (serveInfo, bool) {
 	var si serveInfo
-	if json.Unmarshal(data, &si) != nil || si.PID <= 0 {
+	data, err := os.ReadFile(serveInfoPath())
+	if err != nil || json.Unmarshal(data, &si) != nil || si.PID <= 0 {
+		return si, false
+	}
+	return si, true
+}
+
+func serveRunning() bool {
+	si, ok := runningServeInfo()
+	if !ok {
 		return false
 	}
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(si.Port)), time.Second)

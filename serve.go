@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ type serveInfo struct {
 	PID     int       `json:"pid"`
 	Port    int       `json:"port"`
 	Started time.Time `json:"started"`
+	TLSHost string    `json:"tls_host,omitempty"` // the Tailscale name served over HTTPS
 }
 
 func serveInfoPath() string { return filepath.Join(stateDir(), "serve.json") }
@@ -156,6 +158,9 @@ type server struct {
 }
 
 func serve(port int, demo bool) error {
+	if si, ok := runningServeInfo(); ok && si.PID != os.Getpid() && serveRunning() {
+		return fmt.Errorf("a bridge is already running (pid %d, port %d)", si.PID, si.Port)
+	}
 	host, _ := os.Hostname()
 	s := &server{
 		port: port, host: strings.Split(host, ".")[0],
@@ -174,6 +179,16 @@ func serve(port int, demo bool) error {
 	}
 	s.refresh()
 
+	// HTTPS on the Tailscale side, when the tailnet hands out certificates.
+	var tlsConf *tls.Config
+	tlsHost := ""
+	if c, err := loadTailscaleCert(); err == nil {
+		tlsConf, tlsHost = c.config(), c.domain
+		fmt.Println("HTTPS: on, as", c.domain)
+	} else {
+		fmt.Println("HTTPS: off (" + err.Error() + "); the phone talks plain HTTP inside Tailscale")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/pair", s.handlePair)
 	mux.HandleFunc("GET /v1/me", s.auth(s.handleMe))
@@ -188,14 +203,14 @@ func serve(port int, demo bool) error {
 	if err := os.MkdirAll(stateDir(), 0o700); err != nil {
 		return err
 	}
-	info, _ := json.Marshal(serveInfo{PID: os.Getpid(), Port: port, Started: time.Now()})
+	info, _ := json.Marshal(serveInfo{PID: os.Getpid(), Port: port, Started: time.Now(), TLSHost: tlsHost})
 	writeAtomic(serveInfoPath(), info)
 	defer os.Remove(serveInfoPath())
 
 	// Listen on localhost, and on each Tailscale address as it comes and goes.
 	listening := map[string]net.Listener{}
 	var lmu sync.Mutex
-	listen := func(ip string) {
+	listen := func(ip string, secure bool) {
 		addr := net.JoinHostPort(ip, strconv.Itoa(port))
 		lmu.Lock()
 		defer lmu.Unlock()
@@ -208,8 +223,15 @@ func serve(port int, demo bool) error {
 			fmt.Println("Can't listen on", addr+":", err)
 			return
 		}
+		if secure {
+			ln = tls.NewListener(ln, tlsConf)
+		}
 		listening[addr] = ln
-		fmt.Println("Listening on", addr)
+		if secure {
+			fmt.Println("Listening on", addr, "(HTTPS)")
+		} else {
+			fmt.Println("Listening on", addr)
+		}
 		go func() {
 			srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 			srv.Serve(ln)
@@ -218,9 +240,9 @@ func serve(port int, demo bool) error {
 			lmu.Unlock()
 		}()
 	}
-	listen("127.0.0.1")
+	listen("127.0.0.1", false)
 	for _, ip := range tailscaleIPs() {
-		listen(ip)
+		listen(ip, tlsConf != nil)
 	}
 	if len(tailscaleIPs()) == 0 {
 		fmt.Println("No Tailscale address yet: only this Mac can connect until Tailscale is up.")
@@ -235,7 +257,7 @@ func serve(port int, demo bool) error {
 				s.refresh()
 			case <-recheck.C:
 				for _, ip := range tailscaleIPs() {
-					listen(ip)
+					listen(ip, tlsConf != nil)
 				}
 			}
 		}
