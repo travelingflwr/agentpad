@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -42,6 +43,17 @@ func tailscaleCLI() string {
 	return ""
 }
 
+// tsCommand runs the tailscale CLI. The Mac app's binary only acts as the
+// CLI when TERM is set; without it (as under launchd) it tries to start a
+// second copy of the app instead.
+func tsCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command(tailscaleCLI(), args...)
+	if os.Getenv("TERM") == "" {
+		cmd.Env = append(os.Environ(), "TERM=dumb")
+	}
+	return cmd
+}
+
 // tailscaleCertDomain is the name Tailscale will issue a certificate for,
 // or "" when HTTPS certificates are off for the tailnet.
 func tailscaleCertDomain() (string, error) {
@@ -49,7 +61,7 @@ func tailscaleCertDomain() (string, error) {
 	if cli == "" {
 		return "", fmt.Errorf("no tailscale command found")
 	}
-	out, err := exec.Command(cli, "status", "--json").Output()
+	out, err := tsCommand("status", "--json").Output()
 	if err != nil {
 		return "", fmt.Errorf("tailscale status: %v", err)
 	}
@@ -77,7 +89,7 @@ func (c *tsCert) fetch() error {
 	if cli == "" {
 		return fmt.Errorf("no tailscale command found")
 	}
-	cmd := exec.Command(cli, "cert", "--cert-file", "-", "--key-file", "-", c.domain)
+	cmd := tsCommand("cert", "--cert-file", "-", "--key-file", "-", c.domain)
 	out, err := cmd.Output()
 	if err != nil {
 		msg := err.Error()
