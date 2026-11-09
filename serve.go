@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,8 @@ const serveUsage = `agentpad serve: the bridge for the Nod iPhone app
   agentpad serve pair [--local] [--png FILE]
                                        show a QR code to pair a phone (--local: for the
                                        Simulator; --png: also save it as a picture)
+  agentpad serve install               run the bridge as a service (launchd or systemd)
+  agentpad serve uninstall             stop running it as a service
   agentpad serve devices               list paired devices
   agentpad serve revoke ID             unpair a device
   agentpad serve push-test [ID]        send a test notification
@@ -113,6 +116,10 @@ func runServe(args []string) error {
 			}
 			fmt.Println("Unpaired. Its token stops working now.")
 			return nil
+		case "install":
+			return runServiceInstall(port, false)
+		case "uninstall":
+			return runServiceInstall(port, true)
 		case "push-test":
 			return runPushTest(rest[1:])
 		case "log":
@@ -400,6 +407,30 @@ const (
 	agentMaxAge = 24 * time.Hour
 )
 
+var (
+	mdImage   = regexp.MustCompile(`!\[([^\]]*)\]\([^)]*\)`)
+	mdLink    = regexp.MustCompile(`\[([^\]]+)\]\([^)]*\)`)
+	mdHeading = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	mdBullet  = regexp.MustCompile(`(?m)^\s*[-*]\s+`)
+	spaces    = regexp.MustCompile(`\s+`)
+)
+
+// plainText turns the start of a Markdown reply into one plain line for a
+// card: pictures and links keep only their words, and the markup goes.
+func plainText(s string) string {
+	s = mdImage.ReplaceAllStringFunc(s, func(m string) string {
+		if alt := mdImage.FindStringSubmatch(m)[1]; alt != "" {
+			return "[" + alt + "]"
+		}
+		return "[picture]"
+	})
+	s = mdLink.ReplaceAllString(s, "$1")
+	s = mdHeading.ReplaceAllString(s, "")
+	s = mdBullet.ReplaceAllString(s, "• ")
+	s = strings.NewReplacer("**", "", "__", "", "`", "").Replace(s)
+	return strings.TrimSpace(spaces.ReplaceAllString(s, " "))
+}
+
 func clip(s string, n int) string {
 	if len([]rune(s)) <= n {
 		return s
@@ -525,7 +556,7 @@ func buildSnapshot(host string) apiSnapshot {
 		}
 		aa := apiAgent{
 			SessionID: a.SessionID, Project: a.Project(), State: a.State, Activity: a.Activity,
-			Prompt: clip(a.Prompt, 400), Said: clip(a.Said, 400), Tools: a.Tools, Subagents: a.Subagents,
+			Prompt: clip(plainText(a.Prompt), 400), Said: clip(plainText(a.Said), 400), Tools: a.Tools, Subagents: a.Subagents,
 			Started: a.Started, Updated: a.Updated, Tasks: a.Tasks,
 			NeedsYou: needs[a.SessionID] || a.State == stWaiting,
 		}
