@@ -50,7 +50,7 @@ func (p *pendingRequest) armed() bool { return time.Since(p.opened) >= armDelay 
 
 func (p *pendingRequest) answer(decision string) {
 	out, _ := json.Marshal(approvalResult{Decision: decision})
-	writeAtomic(p.resPath, out)
+	writeExclusive(p.resPath, out) // the first answer wins
 }
 
 // pendingRequests is every open request, by Claude Code session.

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -150,6 +151,7 @@ func redeemPairing(code, name, addr string) (device, string, error) {
 		return device{}, "", errBadPairing
 	}
 	os.Remove(pairingPath()) // single use
+	name = strings.TrimSpace(strings.ReplaceAll(noControl(name), "\n", " "))
 	if name == "" {
 		name = "iPhone"
 	}

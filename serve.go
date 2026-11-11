@@ -198,7 +198,7 @@ func serve(port int, demo bool) error {
 	mux.HandleFunc("POST /v1/requests/{id}/answer", s.auth(s.handleAnswer))
 	mux.HandleFunc("POST /v1/push", s.auth(s.handlePushRegister))
 	mux.HandleFunc("DELETE /v1/devices/self", s.auth(s.handleUnpair))
-	handler := guard(mux)
+	handler := guard(mux, tlsHost)
 
 	if err := os.MkdirAll(stateDir(), 0o700); err != nil {
 		return err
@@ -233,7 +233,7 @@ func serve(port int, demo bool) error {
 			fmt.Println("Listening on", addr)
 		}
 		go func() {
-			srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+			srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
 			srv.Serve(ln)
 			lmu.Lock()
 			delete(listening, addr)
@@ -269,34 +269,125 @@ func serve(port int, demo bool) error {
 	return nil
 }
 
-// tailscaleIPs is this Mac's addresses in Tailscale's range (100.64.0.0/10).
+// tailscaleIPs is this machine's Tailscale addresses. Tailscale's range
+// (100.64.0.0/10) is also what phone carriers, hotspots and some other VPNs
+// hand out, so being in the range isn't enough: the bridge would end up
+// listening, in plain HTTP, on a network that isn't yours. When the
+// tailscale command is there, it says which addresses are Tailscale's.
+// Without it, only a tunnel interface's own single address counts.
 func tailscaleIPs() []string {
 	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10")
-	var out []string
-	addrs, _ := net.InterfaceAddrs()
-	for _, a := range addrs {
-		ipn, ok := a.(*net.IPNet)
-		if !ok {
+	var tunnel []string
+	ifaces, _ := net.Interfaces()
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || !strings.HasPrefix(ifc.Name, "utun") && !strings.HasPrefix(ifc.Name, "tailscale") {
 			continue
 		}
-		if ip4 := ipn.IP.To4(); ip4 != nil && cgnat.Contains(ip4) {
-			out = append(out, ip4.String())
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ones, _ := ipn.Mask.Size()
+			if ip4 := ipn.IP.To4(); ip4 != nil && cgnat.Contains(ip4) && ones == 32 {
+				tunnel = append(tunnel, ip4.String())
+			}
+		}
+	}
+	if len(tunnel) == 0 {
+		return nil
+	}
+	known, ok := tailscaleSays()
+	if !ok {
+		return tunnel
+	}
+	var out []string
+	for _, ip := range tunnel {
+		if known[ip] {
+			out = append(out, ip)
 		}
 	}
 	return out
 }
 
+var (
+	tsSaysMu   sync.Mutex
+	tsSaysAt   time.Time
+	tsSaysIPs  map[string]bool
+	tsSaysOkay bool
+)
+
+// tailscaleSays asks the tailscale command for this machine's addresses,
+// at most every few seconds. ok is false when there's no command to ask.
+func tailscaleSays() (map[string]bool, bool) {
+	tsSaysMu.Lock()
+	defer tsSaysMu.Unlock()
+	if time.Since(tsSaysAt) < 10*time.Second {
+		return tsSaysIPs, tsSaysOkay
+	}
+	tsSaysAt, tsSaysIPs, tsSaysOkay = time.Now(), nil, false
+	if tailscaleCLI() == "" {
+		return nil, false
+	}
+	cmd := tsCommand("ip", "-4")
+	done := time.AfterFunc(3*time.Second, func() {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	})
+	out, err := cmd.Output()
+	done.Stop()
+	if err != nil {
+		return nil, false
+	}
+	tsSaysIPs = map[string]bool{}
+	for _, f := range strings.Fields(string(out)) {
+		if ip := net.ParseIP(f); ip != nil {
+			tsSaysIPs[ip.String()] = true
+		}
+	}
+	tsSaysOkay = true
+	return tsSaysIPs, true
+}
+
 // guard turns away browsers (a page on this Mac could otherwise reach
-// localhost) and caps request bodies.
-func guard(h http.Handler) http.Handler {
+// localhost) and caps request bodies. A request has to name the bridge the
+// way the app does: by address, or by its Tailscale name. Any other name
+// is a web page that pointed its own domain at this machine.
+func guard(h http.Handler, tlsHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" {
 			http.Error(w, "no browsers", http.StatusForbidden)
 			return
 		}
+		if !hostOK(r.Host, tlsHost) {
+			http.Error(w, "wrong host", http.StatusForbidden)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		h.ServeHTTP(w, r)
 	})
+}
+
+func hostOK(hostport, tlsHost string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return net.ParseIP(host) != nil || host == "localhost" || tlsHost != "" && host == strings.ToLower(tlsHost)
+}
+
+// noControl drops control characters from text a phone sent, which ends up
+// in terminals, logs and what Claude is told.
+func noControl(s string) string {
+	return strings.Map(func(c rune) rune {
+		if c < 0x20 && c != '\n' || c == 0x7f || c >= 0x80 && c < 0xa0 || c >= 0x202a && c <= 0x202e || c >= 0x2066 && c <= 0x2069 {
+			return -1
+		}
+		return c
+	}, s)
 }
 
 func clientAddr(r *http.Request) string {
@@ -420,6 +511,11 @@ type apiRequest struct {
 	ArmedAt   time.Time     `json:"armed_at"`
 	Deadline  time.Time     `json:"deadline"`
 	Subagent  bool          `json:"subagent,omitempty"`
+	// Truncated is set when Lines or Text leave something out. A command
+	// is sent whole whenever it reasonably can be; when it can't, the
+	// bridge won't take Allow for it, since you'd be allowing what you
+	// weren't shown. Deny still works.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 const (
@@ -427,6 +523,10 @@ const (
 	maxLineLen  = 240
 	maxTextLen  = 2000
 	agentMaxAge = 24 * time.Hour
+
+	// A command goes to the phone whole up to this size.
+	cmdMaxLen   = 16000
+	cmdMaxLines = 400
 )
 
 var (
@@ -553,6 +653,13 @@ func toAPIRequest(o openRequest) apiRequest {
 		Tool: req.Tool, Label: label, Text: clip(text, maxTextLen),
 		Opened: o.opened, ArmedAt: o.opened.Add(armDelay), Deadline: req.Deadline, Subagent: req.Subagent,
 	}
+	lines, lineLen := maxLines, maxLineLen
+	if out.Kind == "command" {
+		if n := len([]rune(text)); n <= cmdMaxLen && strings.Count(text, "\n") < cmdMaxLines {
+			out.Text, lines, lineLen = text, cmdMaxLines, cmdMaxLen
+		}
+	}
+	out.Truncated = out.Text != text
 	if req.Tool == "AskUserQuestion" {
 		var in struct {
 			Questions []question `json:"questions"`
@@ -582,12 +689,18 @@ func toAPIRequest(o openRequest) apiRequest {
 		case lnNote:
 			op = "…"
 		}
-		if len(out.Lines) < maxLines {
-			out.Lines = append(out.Lines, apiLine{op, clip(l.text, maxLineLen)})
+		if len(out.Lines) < lines {
+			t := clip(l.text, lineLen)
+			out.Truncated = out.Truncated || t != l.text
+			out.Lines = append(out.Lines, apiLine{op, t})
 		}
 	}
-	if n := len(sh.code) - maxLines; n > 0 {
+	if n := len(sh.code) - lines; n > 0 {
 		out.Lines = append(out.Lines, apiLine{"…", fmt.Sprintf("%d more lines", n)})
+		out.Truncated = true
+	}
+	if out.Prose != sh.prose {
+		out.Truncated = true
 	}
 	return out
 }
@@ -890,6 +1003,10 @@ func (s *server) handleAnswer(w http.ResponseWriter, r *http.Request, d device) 
 		reply(http.StatusTooEarly, "too_early", map[string]any{"error": "too early: look before you approve"})
 		return
 	}
+	if (in.Decision == "allow" || in.Decision == "always") && requestKind(req.Tool) == "command" && toAPIRequest(*open).Truncated {
+		reply(http.StatusUnprocessableEntity, "too_long", map[string]any{"error": "this command is too long to show here in full: answer it at the Mac, or deny it"})
+		return
+	}
 	res := approvalResult{Decision: in.Decision, Via: d.Name}
 	isQuestion := req.Tool == "AskUserQuestion"
 	switch in.Decision {
@@ -898,7 +1015,7 @@ func (s *server) handleAnswer(w http.ResponseWriter, r *http.Request, d device) 
 			reply(http.StatusBadRequest, "bad", map[string]any{"error": "a question needs answers"})
 			return
 		}
-		res.Note = clip(strings.TrimSpace(in.Note), 500)
+		res.Note = clip(strings.TrimSpace(noControl(in.Note)), 500)
 	case "always":
 		if isQuestion || alwaysSummary(req.Suggestions, req.Cwd) == "" {
 			reply(http.StatusBadRequest, "bad", map[string]any{"error": "nothing to always allow here"})

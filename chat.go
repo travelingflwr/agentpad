@@ -1623,7 +1623,7 @@ func (a *inlineAsk) armed() bool { return time.Since(a.opened) >= armDelay }
 
 func (a *inlineAsk) answer(decision string) {
 	out, _ := json.Marshal(approvalResult{Decision: decision})
-	writeAtomic(a.resPath, out)
+	writeExclusive(a.resPath, out) // the first answer wins
 }
 
 // drawAsk draws the request as a card in the composer, from y, and returns

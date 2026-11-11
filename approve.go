@@ -47,7 +47,7 @@ func runApprove(args []string) error {
 	}
 	answer := func(decision, note string) {
 		out, _ := json.Marshal(approvalResult{Decision: decision, Note: note})
-		writeAtomic(resPath, out)
+		writeExclusive(resPath, out) // the first answer wins
 	}
 
 	s, done, err := openScreen("")
@@ -68,7 +68,7 @@ func runApprove(args []string) error {
 	draw := func() {
 		s.begin()
 		s.background()
-		key := fmt.Sprint(s.ws, s.pal, armed, gone)
+		key := fmt.Sprint(s.ws, s.pal, armed, gone, sheet.scroll, sheet.unseen())
 		s.show("sheet", key, 1, s.ws.rows, 0, func() *image.RGBA {
 			img := s.canvas(s.heightPt())
 			r := s.renderer()
@@ -87,6 +87,7 @@ func runApprove(args []string) error {
 			return nil
 		case <-s.winch:
 			s.resize()
+			sheet.seenTo = 0 // a new size shows different lines: count again
 			draw()
 		case <-s.snapSig:
 			s.saveSnapshot("sheet")
@@ -135,6 +136,24 @@ func runApprove(args []string) error {
 				answer("terminal", "")
 				return nil
 			}
+			if ev.click == nil && ev.key.mods == 0 {
+				by := 0
+				switch ev.key.code {
+				case keyDown, 'j':
+					by = 1
+				case keyUp, 'k':
+					by = -1
+				case ' ', keyPageDown:
+					by = max(1, sheet.page-1)
+				case keyPageUp:
+					by = -max(1, sheet.page-1)
+				}
+				if by != 0 {
+					sheet.scrollBy(by)
+					draw()
+					continue
+				}
+			}
 			if !armed {
 				continue
 			}
@@ -153,6 +172,12 @@ func runApprove(args []string) error {
 						decision = b.decision
 					}
 				}
+			}
+			if decision != "" && decision != "deny" && sheet.unseen() {
+				// Not yet: show the next part instead.
+				sheet.scrollBy(max(1, sheet.page-1))
+				draw()
+				continue
 			}
 			if decision != "" {
 				answer(decision, "")
@@ -186,7 +211,18 @@ type sheet struct {
 	prose   string // for a fetch: what it will ask of the page
 	always  string // what Always allow adds, or "" for no such option
 	buttons []button
+
+	// When the code is longer than the sheet, it scrolls. Allow waits until
+	// the last line has been on screen: you can't allow what you haven't
+	// been shown.
+	scroll, page, total, seenTo int
 }
+
+// unseen is whether some of the code hasn't been on screen yet.
+func (sh *sheet) unseen() bool { return sh.seenTo < sh.total }
+
+// scrollBy moves the code by n lines; draw clamps it.
+func (sh *sheet) scrollBy(n int) { sh.scroll = max(0, sh.scroll+n) }
 
 func newSheet(req approvalRequest) *sheet {
 	sh := &sheet{req: req}
@@ -484,9 +520,21 @@ func (sh *sheet) draw(r *renderer, img *image.RGBA, w, h float64, armed bool, go
 		if len(proseLines) > 0 {
 			fit = min(fit, len(lines))
 		}
+		sh.total, sh.page = len(lines), len(lines)
 		if fit < len(lines) {
-			more := len(lines) - (fit - 1)
-			lines = append(lines[:fit-1], codeLine{lnNote, fmt.Sprintf("… %d more line%s", more, plural(more))})
+			sh.page = max(1, fit-1)
+			sh.scroll = max(0, min(sh.scroll, len(lines)-sh.page))
+			below := len(lines) - (sh.scroll + sh.page)
+			note := fmt.Sprintf("… %d more line%s: Space shows them", below, plural(below))
+			if below == 0 {
+				note = "That's all of it. Up arrow goes back."
+			}
+			lines = append(append([]codeLine{}, lines[sh.scroll:sh.scroll+sh.page]...), codeLine{lnNote, note})
+		} else {
+			sh.scroll = 0
+		}
+		if sh.scroll <= sh.seenTo { // only what follows on from what's been shown
+			sh.seenTo = max(sh.seenTo, sh.scroll+sh.page)
 		}
 		boxH := float64(len(lines))*codeLineH + 2*codePad
 		r.fillRoundRect(img, x0, y, x1, y+boxH, 8, r.tinted(r.pal.text, 0.06))
@@ -573,6 +621,8 @@ func (sh *sheet) draw(r *renderer, img *image.RGBA, w, h float64, armed bool, go
 		}
 		if b.decision == "deny" {
 			fg = premulOr(r, r.red(), fade)
+		} else if sh.unseen() { // not until the rest has been shown
+			bg, fg = r.tinted(r.pal.text, 0.05), premulOr(r, r.pal.text, 0.4)
 		}
 		r.fillRoundRect(img, bx, btnY0, bx+bw, btnY1, buttonH/2, bg)
 		lw := r.width(r.clean(labels[i], true), 13, true)
@@ -581,7 +631,7 @@ func (sh *sheet) draw(r *renderer, img *image.RGBA, w, h float64, armed bool, go
 		r.drawRaw(img, r.clean(labels[i], true), cx, btnY0+buttonH/2+4.5, 13, true, fg)
 		kx := cx + lw + 6
 		capBg := r.tinted(r.pal.text, 0.1*fade)
-		if b.primary {
+		if b.primary && !sh.unseen() {
 			capBg = premul(white, 0.22*fade)
 		}
 		r.fillRoundRect(img, kx, btnY0+7, kx+capW, btnY1-7, 4, capBg)
@@ -593,6 +643,8 @@ func (sh *sheet) draw(r *renderer, img *image.RGBA, w, h float64, armed bool, go
 	hint := "Esc answers in the terminal instead"
 	if !armed {
 		hint = "Getting ready…"
+	} else if sh.unseen() {
+		hint = "Space shows the rest; you can allow once you've seen it all"
 	}
 	r.text(img, hint, x0, hintY-2, 11, false, r.pal.faint, x1-x0)
 }

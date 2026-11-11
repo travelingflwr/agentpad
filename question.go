@@ -48,7 +48,7 @@ func runQuestion(req approvalRequest, resPath string) error {
 	}
 	answer := func(res approvalResult) {
 		out, _ := json.Marshal(res)
-		writeAtomic(resPath, out)
+		writeExclusive(resPath, out) // the first answer wins
 	}
 
 	s, done, err := openScreen("")
