@@ -57,6 +57,12 @@ func runInstall(args []string, remove bool) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", *path, err)
 	}
+	// Keep Claude's file tools out of agentpad's own folders.
+	out, protected, err := editDeny(out, protectRules(), remove)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *path, err)
+	}
+	changed = changed || protected
 	if !changed {
 		fmt.Println("nothing to change in", *path)
 		return nil
@@ -78,6 +84,7 @@ func runInstall(args []string, remove bool) error {
 		fmt.Println("removed agentpad's hooks from", *path)
 	} else {
 		fmt.Printf("added agentpad's %d hooks to %s.\nClaude Code sessions started from now on use them.\n", len(hookEvents), *path)
+		fmt.Println("Claude's file tools are kept out of agentpad's own folders:", strings.Join(protectRules(), ", "))
 	}
 	return nil
 }
@@ -163,6 +170,87 @@ func editHooks(settings []byte, command string, remove bool) ([]byte, bool, erro
 	same, _ := json.Marshal(before)
 	now, _ := json.Marshal(after)
 	return out.Bytes(), !bytes.Equal(same, now), nil
+}
+
+// protectRules are deny rules that keep Claude's file tools from changing
+// agentpad's own folders. An answer to a request is a file in the state
+// folder and a paired phone is an entry in the config folder, so an agent
+// that could write there could approve its own requests. These rules cover
+// Edit and Write. They don't cover a shell command, which you approve (or
+// have allowed) yourself.
+func protectRules() []string {
+	home, _ := os.UserHomeDir()
+	rule := func(dir string) string {
+		if rel, err := filepath.Rel(home, dir); err == nil && home != "" && !strings.HasPrefix(rel, "..") {
+			return "Edit(~/" + filepath.ToSlash(rel) + "/**)"
+		}
+		return "Edit(/" + filepath.ToSlash(dir) + "/**)" // "//path" is an absolute path in a rule
+	}
+	return []string{rule(stateDir()), rule(configDir())}
+}
+
+// editDeny adds rules to permissions.deny (or removes them), keeping
+// everything else, and says whether anything changed.
+func editDeny(settings []byte, rules []string, remove bool) ([]byte, bool, error) {
+	top, err := parseObject(settings)
+	if err != nil {
+		return nil, false, err
+	}
+	permsRaw, _ := top.get("permissions")
+	if permsRaw == nil {
+		permsRaw = json.RawMessage("{}")
+	}
+	perms, err := parseObject(permsRaw)
+	if err != nil {
+		return nil, false, fmt.Errorf("permissions: %w", err)
+	}
+	var deny []string
+	if raw, ok := perms.get("deny"); ok {
+		if err := json.Unmarshal(raw, &deny); err != nil {
+			return nil, false, fmt.Errorf("permissions.deny: %w", err)
+		}
+	}
+	ours := map[string]bool{}
+	for _, r := range rules {
+		ours[r] = true
+	}
+	var kept []string
+	have := map[string]bool{}
+	changed := false
+	for _, d := range deny {
+		if remove && ours[d] {
+			changed = true
+			continue
+		}
+		have[d] = true
+		kept = append(kept, d)
+	}
+	if !remove {
+		for _, r := range rules {
+			if !have[r] {
+				kept, changed = append(kept, r), true
+			}
+		}
+	}
+	if !changed {
+		return settings, false, nil
+	}
+	if len(kept) == 0 {
+		perms.del("deny")
+	} else {
+		perms.set("deny", marshalPlain(kept))
+	}
+	if len(perms) == 0 {
+		top.del("permissions")
+	} else {
+		top.set("permissions", perms.encode())
+	}
+	var out bytes.Buffer
+	if err := json.Indent(&out, top.encode(), "", "  "); err != nil {
+		return nil, false, err
+	}
+	out.WriteByte('\n')
+	return out.Bytes(), true, nil
 }
 
 // object is a JSON object that keeps its keys in order.

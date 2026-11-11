@@ -506,6 +506,10 @@ func runChat(args []string) error {
 				return
 			}
 			d := strings.TrimPrefix(a, "ask:")
+			if ch.ask.cut && (d == "allow" || d == "always") {
+				ch.flash = "There's more than the card shows: Esc answers it in the terminal"
+				return
+			}
 			ch.ask.answer(d)
 			if d == "terminal" {
 				focusBlock("", session, engine)
@@ -1593,7 +1597,14 @@ type inlineAsk struct {
 	resPath string
 	sheet   *sheet
 	opened  time.Time
+	// cut is set when the card can't show all of the command or diff. Then
+	// it can't be allowed from the card: Esc hands it to Claude Code's own
+	// prompt, which shows everything.
+	cut bool
 }
+
+// askMaxLines is how much code a request's card shows.
+const askMaxLines = 10
 
 // pendingAsk is the open inline request for the Claude Code session, if any.
 func pendingAsk(sessionID string) (*inlineAsk, bool) {
@@ -1649,7 +1660,10 @@ func (ch *chatView) drawAsk(p painter, a *inlineAsk, x0, x1, y float64) float64 
 	}
 	y += 10
 	if len(sh.code) > 0 {
-		y = ch.drawCode(p, sh.code, x0+pad, x1-pad, y, 10) + 10
+		m := r.mono()
+		cols := max(10, int((x1-x0-2*pad-2*codePad-14)/m.width("M", codeSize, false)))
+		a.cut = len(wrapCode(sh.code, cols)) > askMaxLines
+		y = ch.drawCode(p, sh.code, x0+pad, x1-pad, y, askMaxLines) + 10
 	}
 	if sh.prose != "" {
 		y = ch.richText(p, sh.prose, x0+pad, y, x1-x0-2*pad, 12.5, 18, r.pal.gray) + 8
@@ -1682,6 +1696,8 @@ func (ch *chatView) drawAsk(p painter, a *inlineAsk, x0, x1, y float64) float64 
 		}
 		if b.decision == "deny" {
 			fg = premulOr(r, r.red(), fade)
+		} else if a.cut {
+			bg, fg = r.tinted(r.pal.text, 0.05), premulOr(r, r.pal.text, 0.4)
 		}
 		p.roundRect(bx, y, bx+bw, y+buttonH, buttonH/2, bg)
 		p.raw(b.label, bx+14, y+buttonH/2+4.5, 13, true, fg)
@@ -1696,7 +1712,9 @@ func (ch *chatView) drawAsk(p painter, a *inlineAsk, x0, x1, y float64) float64 
 	}
 	y += buttonH + 8
 	hint := "Esc answers in the terminal"
-	if sh.always != "" {
+	if a.cut {
+		hint = "Too long to show here in full: Esc answers it in the terminal"
+	} else if sh.always != "" {
 		hint = "Always: " + sh.always
 	}
 	p.text(hint, x0+pad, y+12, 11, false, r.pal.faint, x1-x0-2*pad)

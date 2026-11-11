@@ -92,4 +92,43 @@ func TestCommandsAreSentWhole(t *testing.T) {
 	if r = toAPIRequest(bash(strings.Repeat("true\n", cmdMaxLines+5))); !r.Truncated {
 		t.Error("a command with too many lines should be marked truncated")
 	}
+	write := func(lines int) apiRequest {
+		in, _ := json.Marshal(map[string]string{"file_path": "/tmp/x/notes.txt", "content": strings.Repeat("a line\n", lines)})
+		return toAPIRequest(openRequest{req: approvalRequest{ID: "a", Tool: "Write", Cwd: "/tmp/x", Input: in}})
+	}
+	if r = write(300); r.Truncated || len(r.Lines) != 300 {
+		t.Errorf("a 300-line file should arrive whole (truncated=%v, %d lines)", r.Truncated, len(r.Lines))
+	}
+	if r = write(maxLines + 50); !r.Truncated {
+		t.Error("a file over the limit should be marked truncated")
+	}
+}
+
+func TestEditDeny(t *testing.T) {
+	rules := []string{"Edit(~/.local/state/agentpad/**)", "Edit(~/.config/agentpad/**)"}
+	in := []byte(`{"model":"x","permissions":{"allow":["Bash(ls:*)"],"deny":["Read(~/.ssh/**)"]}}`)
+	out, changed, err := editDeny(in, rules, false)
+	if err != nil || !changed {
+		t.Fatalf("add: %v %v", changed, err)
+	}
+	var got struct {
+		Model       string
+		Permissions struct{ Allow, Deny []string }
+	}
+	json.Unmarshal(out, &got)
+	if got.Model != "x" || len(got.Permissions.Allow) != 1 || strings.Join(got.Permissions.Deny, " ") != "Read(~/.ssh/**) "+strings.Join(rules, " ") {
+		t.Errorf("after add: %s", out)
+	}
+	if _, again, _ := editDeny(out, rules, false); again {
+		t.Error("adding twice should change nothing")
+	}
+	back, changed, _ := editDeny(out, rules, true)
+	json.Unmarshal(back, &got)
+	if !changed || strings.Join(got.Permissions.Deny, " ") != "Read(~/.ssh/**)" {
+		t.Errorf("after remove: %s", back)
+	}
+	only, _, _ := editDeny([]byte(`{}`), rules, false)
+	if back, _, _ := editDeny(only, rules, true); strings.TrimSpace(string(back)) != "{}" {
+		t.Errorf("remove should leave nothing behind: %s", back)
+	}
 }

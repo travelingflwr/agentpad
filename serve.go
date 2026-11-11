@@ -511,22 +511,22 @@ type apiRequest struct {
 	ArmedAt   time.Time     `json:"armed_at"`
 	Deadline  time.Time     `json:"deadline"`
 	Subagent  bool          `json:"subagent,omitempty"`
-	// Truncated is set when Lines or Text leave something out. A command
-	// is sent whole whenever it reasonably can be; when it can't, the
-	// bridge won't take Allow for it, since you'd be allowing what you
+	// Truncated is set when Lines, Text or Prose leave something out. A
+	// request is sent whole whenever it reasonably can be; when it can't,
+	// the bridge won't take Allow for it, since you'd be allowing what you
 	// weren't shown. Deny still works.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
 const (
-	maxLines    = 80
-	maxLineLen  = 240
+	maxLines    = 400  // of a command or a diff
+	maxLineLen  = 2000 // of one line of a diff
 	maxTextLen  = 2000
 	agentMaxAge = 24 * time.Hour
 
 	// A command goes to the phone whole up to this size.
 	cmdMaxLen   = 16000
-	cmdMaxLines = 400
+	cmdMaxLines = maxLines
 )
 
 var (
@@ -1003,8 +1003,8 @@ func (s *server) handleAnswer(w http.ResponseWriter, r *http.Request, d device) 
 		reply(http.StatusTooEarly, "too_early", map[string]any{"error": "too early: look before you approve"})
 		return
 	}
-	if (in.Decision == "allow" || in.Decision == "always") && requestKind(req.Tool) == "command" && toAPIRequest(*open).Truncated {
-		reply(http.StatusUnprocessableEntity, "too_long", map[string]any{"error": "this command is too long to show here in full: answer it at the Mac, or deny it"})
+	if (in.Decision == "allow" || in.Decision == "always") && toAPIRequest(*open).Truncated {
+		reply(http.StatusUnprocessableEntity, "too_long", map[string]any{"error": "this is too long to show here in full: answer it at the Mac, or deny it"})
 		return
 	}
 	res := approvalResult{Decision: in.Decision, Via: d.Name}

@@ -102,6 +102,10 @@ type activityView struct {
 	host    string
 	msg     string
 	demoCtx map[string]contextUse // the demo's, in place of the real ones
+	// whole is the sessions whose card shows all of what's being asked: a
+	// command or an address that fits. Only those can be allowed from the
+	// card; anything else (a diff, a long command) is reviewed in its tab.
+	whole map[string]bool
 }
 
 func (v *activityView) contextOf(a Agent) (contextUse, bool) {
@@ -181,6 +185,10 @@ func runActivity(args []string) error {
 		case "allow", "always", "deny":
 			if p := v.pending[id]; p != nil {
 				if !p.armed() {
+					return
+				}
+				if kind != "deny" && !v.whole[id] {
+					say("There's more to this than the card shows: review it in its tab")
 					return
 				}
 				p.answer(kind)
@@ -663,6 +671,13 @@ func (v *activityView) needsCard(p avPaint, c avColors, a Agent, x0, x1, y float
 	if question || plain {
 		lines = r.wrap(what, 13.5, false, ix1-ix0-24)
 	}
+	whole := pend != nil && (pend.req.Tool == "Bash" || pend.req.Tool == "WebFetch") && len(lines) <= 3
+	if p.on() {
+		if v.whole == nil {
+			v.whole = map[string]bool{}
+		}
+		v.whole[a.SessionID] = whole
+	}
 	if len(lines) > 3 {
 		lines = append(lines[:3:3], "…")
 	}
@@ -688,7 +703,13 @@ func (v *activityView) needsCard(p avPaint, c avColors, a Agent, x0, x1, y float
 		weight        float64
 	}
 	var bs []button
-	if pend != nil && !question {
+	if pend != nil && !question && !whole {
+		// You can't allow what the card doesn't show.
+		bs = []button{
+			{"Deny", "deny:" + a.SessionID, false, 1},
+			{"Review in its tab", "open:" + a.SessionID, true, 2.3},
+		}
+	} else if pend != nil && !question {
 		bs = []button{
 			{"Deny", "deny:" + a.SessionID, false, 1},
 			{"Always", "always:" + a.SessionID, false, 1},

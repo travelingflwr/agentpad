@@ -27,6 +27,11 @@ the command in a code box, an edit as a diff, a new file's contents.
 - **y** allows it, **a** always allows it (and says what that remembers,
   such as "commands starting with go test in this project"), **n** denies it.
   Clicking the buttons works too.
+- **You can't allow what you haven't been shown.** A command or diff longer
+  than the sheet scrolls (**Space**, the arrow keys), and Allow waits until
+  you've reached the end. Deny works at any point. The same goes everywhere
+  else a request can be answered: a card that can't show all of it sends
+  you to where you can read it.
 - **Esc** leaves it to the terminal. Claude Code's own prompt is up the whole
   time, and answering it there closes the sheet.
 - The sheet ignores keys for its first moment, so typing in another pane as
@@ -127,6 +132,9 @@ agentpad install           # adds its hooks to ~/.claude/settings.json
 `agentpad install` backs up your settings first, keeps everything else in
 the file as it was, and tags its hooks so `agentpad uninstall` can take
 exactly those out again. Claude Code sessions started afterwards use them.
+It also adds two deny rules that keep Claude's file tools out of agentpad's
+own folders (`~/.local/state/agentpad` and `~/.config/agentpad`), where an
+answer to a request is a file: an agent shouldn't be able to write its own.
 To try it on one session first, install into another file and pass it to
 Claude: `agentpad install --settings try.json`, then `claude --settings try.json`.
 
